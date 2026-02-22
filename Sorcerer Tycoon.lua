@@ -1,5 +1,5 @@
 -- ================================================
--- SORCERER SCRIPTS - RAYFIELD UI v11
+-- SORCERER SCRIPTS - RAYFIELD UI v13
 -- Auto Farm | Dump Boss | Dash No CD
 -- Skills | Auto Awakening | Movement
 -- ================================================
@@ -21,7 +21,7 @@ if os.time() > expiry then
         Text     = "This script has expired. Contact the owner for an update.",
         Duration = 10,
     })
-    return  -- stops the entire script here
+    return
 end
 
 -- ================================================
@@ -89,22 +89,59 @@ local State = {
     DashNoCD      = false,
     AutoAwakening = false,
     AutoCollectYen= false,
+    AutoUpgrade   = false,
+    GodMode       = false,
     FlySpeed      = 80,
     WalkSpeed     = 200,
     LastBossPos   = nil,
 }
 
+-- ================================================
+-- GOD MODE — Instant Respawn at Death Position
+-- Saves CFrame where player died, calls
+-- LoadCharacter(), then teleports back there.
+-- ================================================
+local godModeConns = {}
+local lastDeathPos = nil
+
+local function ApplyGodModeToChar(char)
+    if not char then return end
+    local hum = char:WaitForChild("Humanoid", 5)
+    if not hum then return end
+    local hrp = char:WaitForChild("HumanoidRootPart", 5)
+    if not hrp then return end
+
+    local conn = hum.Died:Connect(function()
+        if not State.GodMode then return end
+        lastDeathPos = hrp.CFrame
+        task.wait(0.05)
+        pcall(function() Player:LoadCharacter() end)
+    end)
+    table.insert(godModeConns, conn)
+end
+
+local function StartGodMode()
+    State.GodMode = true
+    ApplyGodModeToChar(Character)
+end
+
+local function StopGodMode()
+    State.GodMode = false
+    lastDeathPos = nil
+    for _, c in ipairs(godModeConns) do
+        pcall(function() c:Disconnect() end)
+    end
+    godModeConns = {}
+end
+
 local FlyVelocity, FlyGyro
-local farmThread = nil
+local farmThread    = nil
 
 -- ================================================
 -- DASH NO COOLDOWN
--- Removes only dash/movement cooldowns every 0.05s
--- Placed inside the main farm loop automatically
 -- ================================================
 local function ClearDashCD()
     if not Character then return end
-    -- Destroy dash-related values in Cooldowns folder
     for _, fn in ipairs({"Cooldowns", "Cooldown"}) do
         local f = Character:FindFirstChild(fn)
         if f then
@@ -118,7 +155,6 @@ local function ClearDashCD()
             end
         end
     end
-    -- Zero dash cooldown attributes on character
     for _, obj in ipairs(Character:GetDescendants()) do
         local ok, attrs = pcall(function() return obj:GetAttributes() end)
         if ok and type(attrs) == "table" then
@@ -236,22 +272,140 @@ local function StartAutoCollectYen()
             if HRP then
                 for _, obj in ipairs(workspace:GetDescendants()) do
                     if not State.AutoCollectYen then break end
-                    local name = obj.Name:lower()
-                    if obj:IsA("BasePart") and (
-                        name:find("yen") or name:find("coin") or
-                        name:find("money") or name:find("pickup") or
-                        name:find("collect") or name:find("drop")
-                    ) then
-                        pcall(function()
-                            firetouchinterest(HRP, obj, 0)
-                            firetouchinterest(HRP, obj, 1)
-                        end)
+                    if obj:IsA("ProximityPrompt") then
+                        local low = obj.Parent and obj.Parent.Name:lower() or ""
+                        local actionLow = obj.ActionText and obj.ActionText:lower() or ""
+                        if low:find("yen") or low:find("coin") or low:find("drop") or
+                           low:find("reward") or low:find("pickup") or low:find("collect") or
+                           low:find("cursed energy") or low:find("cursed finger") or
+                           low:find("remain") or low:find("relic") or low:find("orb") or
+                           actionLow:find("collect") or actionLow:find("pick") or
+                           actionLow:find("grab") then
+                            pcall(function() fireproximityprompt(obj) end)
+                        end
+                    end
+                    if obj:IsA("BasePart") then
+                        local low = obj.Name:lower()
+                        if low:find("yen") or low:find("coin") or low:find("drop") or
+                           low:find("pickup") or low:find("collect") or
+                           low:find("cursed energy") or low:find("cursed finger") then
+                            pcall(function() firetouchinterest(HRP, obj, 0) end)
+                            pcall(function() firetouchinterest(HRP, obj, 1) end)
+                        end
                     end
                 end
             end
-            task.wait(0.5)
+            task.wait(0.3)
         end
     end)
+end
+
+-- ================================================
+-- AUTO UPGRADE TYCOON
+-- ================================================
+local TycoonNames = {
+    "Choso","Gojo","Hanami","Jogo","Maki",
+    "Megumi","Nanami","Nobara","Todo","Toge","Toji","Yuji"
+}
+
+local TycoonStateRemote = GetRemote({"Tycoon", "GetTycoonsState"})
+local CurrentTycoon     = nil
+
+local function DetectMyTycoon()
+    if TycoonStateRemote then
+        local ok, result = pcall(function()
+            return TycoonStateRemote:InvokeServer()
+        end)
+        if ok and type(result) == "table" then
+            for name, data in pairs(result) do
+                if type(data) == "table" and data.claimed and
+                   data.ownerId == Player.UserId then
+                    CurrentTycoon = name
+                    return name
+                end
+            end
+        end
+    end
+    local folder = workspace:FindFirstChild("Map")
+    folder = folder and folder:FindFirstChild("Tycoon")
+    if folder then
+        for _, name in ipairs(TycoonNames) do
+            local t = folder:FindFirstChild(name)
+            if t then
+                local ov = t:FindFirstChild("Owner") or t:FindFirstChild("OwnerName")
+                if ov then
+                    if ov:IsA("StringValue") and ov.Value == Player.Name then
+                        CurrentTycoon = name; return name
+                    end
+                    if ov:IsA("ObjectValue") and ov.Value == Player then
+                        CurrentTycoon = name; return name
+                    end
+                end
+                if t:GetAttribute("Owner") == Player.Name or
+                   t:GetAttribute("OwnerId") == Player.UserId then
+                    CurrentTycoon = name; return name
+                end
+            end
+        end
+    end
+    return nil
+end
+
+local upgradeThread = nil
+local function StartAutoUpgrade()
+    State.AutoUpgrade = true
+    upgradeThread = task.spawn(function()
+        while State.AutoUpgrade do
+            if not CurrentTycoon then DetectMyTycoon() end
+            if CurrentTycoon and HRP then
+                local folder = workspace:FindFirstChild("Map")
+                folder = folder and folder:FindFirstChild("Tycoon")
+                local myTycoon = folder and folder:FindFirstChild(CurrentTycoon)
+                if myTycoon then
+                    local pads = {}
+                    for _, obj in ipairs(myTycoon:GetDescendants()) do
+                        if obj:IsA("BasePart") and
+                           obj.Name:sub(1, 14) == "Marker_Button_" and
+                           obj:FindFirstChild("TouchInterest") then
+                            table.insert(pads, obj)
+                        end
+                    end
+                    table.sort(pads, function(a, b)
+                        local na = tonumber(a.Name:match("_(%d+)$")) or 0
+                        local nb = tonumber(b.Name:match("_(%d+)$")) or 0
+                        if na == nb then return a.Name < b.Name end
+                        return na < nb
+                    end)
+                    local savedCFrame = HRP.CFrame
+                    for _, pad in ipairs(pads) do
+                        if not State.AutoUpgrade then break end
+                        pcall(function()
+                            HRP.CFrame = CFrame.new(
+                                pad.Position.X,
+                                pad.Position.Y + pad.Size.Y / 2 + 2.5,
+                                pad.Position.Z
+                            )
+                            task.wait(0.05)
+                            firetouchinterest(HRP, pad, 0)
+                            task.wait(0.05)
+                            firetouchinterest(HRP, pad, 1)
+                        end)
+                        task.wait(0.1)
+                    end
+                    pcall(function() HRP.CFrame = savedCFrame end)
+                else
+                    DetectMyTycoon()
+                end
+            end
+            task.wait(1)
+        end
+        upgradeThread = nil
+    end)
+end
+
+local function StopAutoUpgrade()
+    State.AutoUpgrade = false
+    upgradeThread = nil
 end
 
 -- ================================================
@@ -260,13 +414,12 @@ end
 local function SpamSkills(boss, _, bossHRP)
     if SkillRemote then
         -- ============================================================
-        -- SKILLS LIST — edite aqui para adicionar/remover skills
-        -- Formato: SkillRemote:FireServer("Personagem", "NomeDaSkill")
+        -- SKILLS LIST — edit here to add/remove skills
+        -- Format: SkillRemote:FireServer("Character", "SkillName")
         -- ============================================================
         pcall(function() SkillRemote:FireServer("Jogo", "Coffin of the Iron Mountain") end)
-        -- ADICIONE MAIS SKILLS ABAIXO:
-        -- pcall(function() SkillRemote:FireServer("Personagem", "NomeDaSkill") end)
-        -- pcall(function() SkillRemote:FireServer("Personagem", "NomeDaSkill") end)
+        -- ADD MORE SKILLS BELOW:
+        -- pcall(function() SkillRemote:FireServer("Character", "SkillName") end)
         -- ============================================================
     end
     if M1Remote then pcall(function() M1Remote:FireServer(bossHRP) end) end
@@ -284,7 +437,7 @@ local function SpamSkills(boss, _, bossHRP)
 end
 
 -- ================================================
--- FARM LOOP  (also runs Dash No CD while farming)
+-- FARM LOOP
 -- ================================================
 local function StartFarm()
     if farmThread then return end
@@ -298,7 +451,6 @@ local function StartFarm()
                     HRP.CFrame = CFrame.lookAt(HRP.Position, bossHRP.Position)
                 end
                 SpamSkills(boss, bossHum, bossHRP)
-                -- Dash CD cleared every farm tick when DashNoCD is on
                 if State.DashNoCD then ClearDashCD() end
             else
                 task.wait(1)
@@ -392,6 +544,11 @@ task.spawn(function()
     end
 end)
 
+task.spawn(function()
+    task.wait(3)
+    DetectMyTycoon()
+end)
+
 -- ================================================
 -- RESPAWN HANDLER
 -- ================================================
@@ -401,7 +558,18 @@ Player.CharacterAdded:Connect(function(char)
     HRP       = char:WaitForChild("HumanoidRootPart")
     State.Flying = false
     State.Noclip = false
-    if State.AutoFarm and State.LastBossPos then
+
+    -- God Mode: teleport back to exact death position
+    if State.GodMode and lastDeathPos then
+        task.spawn(function()
+            for _ = 1, 8 do
+                task.wait(0.1)
+                if HRP then
+                    pcall(function() HRP.CFrame = lastDeathPos end)
+                end
+            end
+        end)
+    elseif State.AutoFarm and State.LastBossPos then
         task.spawn(function()
             for _ = 1, 5 do
                 task.wait(0.2)
@@ -415,13 +583,20 @@ Player.CharacterAdded:Connect(function(char)
             if State.AutoFarm then StartFarm() end
         end)
     end
+
     if State.SpeedHack then
         task.wait(1.5)
         Humanoid.WalkSpeed = State.WalkSpeed
         if SpeedRemote then pcall(function() SpeedRemote:FireServer(State.WalkSpeed) end) end
     end
-    if State.DashNoCD     then task.wait(1); StartDashNoCD()      end
+    if State.DashNoCD      then task.wait(1); StartDashNoCD()      end
     if State.AutoAwakening then task.wait(1); StartAutoAwakening() end
+    if State.GodMode then
+        for _, c in ipairs(godModeConns) do pcall(function() c:Disconnect() end) end
+        godModeConns = {}
+        task.wait(0.5)
+        ApplyGodModeToChar(char)
+    end
 end)
 
 -- ================================================
@@ -451,29 +626,36 @@ local Window = Rayfield:CreateWindow({
 local IKKI_ASSET_ID = 79541805588283
 
 local logoGui = Instance.new("ScreenGui")
-logoGui.Name = "IkkiLogoGui"
-logoGui.ResetOnSpawn = false
-logoGui.DisplayOrder = 999
+logoGui.Name           = "IkkiLogoGui"
+logoGui.ResetOnSpawn   = false
+logoGui.DisplayOrder   = 999
 logoGui.IgnoreGuiInset = true
-logoGui.Parent = Player.PlayerGui
+logoGui.Parent         = Player.PlayerGui
 
 local logo = Instance.new("ImageLabel")
-logo.Size = UDim2.new(0, 42, 0, 42)
-logo.Position = UDim2.new(0, 14, 0, 14)
+logo.Size                   = UDim2.new(0, 42, 0, 42)
+logo.Position               = UDim2.new(0, 14, 0, 14)
 logo.BackgroundTransparency = 1
-logo.Image = "rbxassetid://" .. tostring(IKKI_ASSET_ID)
-logo.ScaleType = Enum.ScaleType.Fit
-logo.ZIndex = 999
-logo.Parent = logoGui
+logo.Image                  = "rbxassetid://" .. tostring(IKKI_ASSET_ID)
+logo.ScaleType              = Enum.ScaleType.Fit
+logo.ZIndex                 = 999
+logo.Parent                 = logoGui
 Instance.new("UICorner", logo).CornerRadius = UDim.new(1, 0)
 
 -- ================================================
--- TAB: AUTO FARM
+-- TAB: MAIN
 -- ================================================
-local FarmTab = Window:CreateTab("⚔ Auto Farm", 4483362458)
+local FarmTab = Window:CreateTab("⚔ Main", 4483362458)
+
+FarmTab:CreateToggle({
+    Name = "God Mode (Instant Respawn)", CurrentValue = false, Flag = "GodMode",
+    Callback = function(v)
+        if v then StartGodMode() else StopGodMode() end
+    end,
+})
 
 local StatusParagraph = FarmTab:CreateParagraph({
-    Title = "Boss Status", Content = "Verificando...",
+    Title = "Boss Status", Content = "Checking...",
 })
 
 task.spawn(function()
@@ -532,6 +714,18 @@ FarmTab:CreateToggle({
 })
 
 FarmTab:CreateToggle({
+    Name = "Auto Upgrade Tycoon", CurrentValue = false, Flag = "AutoUpgrade",
+    Callback = function(v)
+        if v then
+            if not CurrentTycoon then DetectMyTycoon() end
+            StartAutoUpgrade()
+        else
+            StopAutoUpgrade()
+        end
+    end,
+})
+
+FarmTab:CreateToggle({
     Name = "Auto Limit Break", CurrentValue = false, Flag = "AutoLB",
     Callback = function(v) State.AutoLB = v end,
 })
@@ -546,11 +740,6 @@ FarmTab:CreateToggle({
 -- ================================================
 local SkillTab = Window:CreateTab("⚡ Skills", 4483362458)
 
--- ============================================================
--- SKILLS INDIVIDUAIS — botões para disparar cada skill manualmente
--- ============================================================
-
--- JOGO
 SkillTab:CreateParagraph({
     Title   = "Domain Expansion",
     Content = "Character Domain Expansion and Skill. You need unlock all First",
@@ -592,25 +781,104 @@ SkillTab:CreateButton({
         Rayfield:Notify({ Title = "Toji", Content = "Heavenly Restriction: Complete", Duration = 2 })
     end,
 })
+
 -- ============================================================
--- ADICIONE MAIS PERSONAGENS ABAIXO NESTE FORMATO:
+-- ADD MORE CHARACTERS BELOW IN THIS FORMAT:
 --
--- SkillTab:CreateParagraph({ Title = "NomePersonagem", Content = "Skills de NomePersonagem" })
+-- SkillTab:CreateParagraph({ Title = "CharacterName", Content = "CharacterName Skills" })
 --
 -- SkillTab:CreateButton({
---     Name = "NomePersonagem — NomeDaSkill",
+--     Name = "CharacterName — SkillName",
 --     Callback = function()
 --         if SkillRemote then
---             pcall(function() SkillRemote:FireServer("NomePersonagem", "NomeDaSkill") end)
+--             pcall(function() SkillRemote:FireServer("CharacterName", "SkillName") end)
 --         end
 --     end,
 -- })
 -- ============================================================
 
+SkillTab:CreateToggle({
+    Name = "Auto Awakening", CurrentValue = false, Flag = "AutoAwakening",
+    Callback = function(v)
+        if v then StartAutoAwakening() else StopAutoAwakening() end
+    end,
+})
+
 -- ================================================
 -- TAB: MOVEMENT
 -- ================================================
 local MoveTab = Window:CreateTab("🏃 Movement", 4483362458)
+
+-- ================================================
+-- TAB: TELEPORT
+-- ================================================
+-- Rayfield does not support removing elements from a tab visually.
+-- Solution: destroy the entire tab and recreate it on refresh.
+local TpTab = nil
+
+local function GetPlayerNames()
+    local names = {}
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= Player then
+            table.insert(names, p.Name)
+        end
+    end
+    return names
+end
+
+local function BuildTeleportTab()
+    -- Destroy old tab if it exists
+    if TpTab then
+        pcall(function() TpTab:Destroy() end)
+        TpTab = nil
+    end
+
+    TpTab = Window:CreateTab("🔀 Teleport", 4483362458)
+
+    -- Update button always at the top
+    TpTab:CreateButton({
+        Name = "🔄 Update List",
+        Callback = function()
+            BuildTeleportTab()
+            Rayfield:Notify({ Title = "✅ List updated", Content = #GetPlayerNames() .. " players", Duration = 2 })
+        end,
+    })
+
+    local names = GetPlayerNames()
+    if #names == 0 then
+        TpTab:CreateParagraph({ Title = "No players online", Content = "Click Update List to refresh." })
+        return
+    end
+
+    for _, name in ipairs(names) do
+        local pName = name
+        TpTab:CreateButton({
+            Name = "➡ " .. pName,
+            Callback = function()
+                local target = Players:FindFirstChild(pName)
+                if target and target.Character then
+                    local tHRP = target.Character:FindFirstChild("HumanoidRootPart")
+                    if tHRP and HRP then
+                        HRP.CFrame = tHRP.CFrame * CFrame.new(0, 0, 3)
+                        Rayfield:Notify({ Title = "✅ Teleported", Content = "→ " .. pName, Duration = 2 })
+                    end
+                else
+                    Rayfield:Notify({ Title = "❌ " .. pName, Content = "Character not found.", Duration = 2 })
+                end
+            end,
+        })
+    end
+end
+
+-- Build on load
+task.spawn(function()
+    task.wait(2)
+    BuildTeleportTab()
+end)
+
+-- Auto rebuild when players join/leave
+Players.PlayerAdded:Connect(function() task.wait(0.5) BuildTeleportTab() end)
+Players.PlayerRemoving:Connect(function() task.wait(0.5) BuildTeleportTab() end)
 
 MoveTab:CreateToggle({
     Name = "Fly", CurrentValue = false, Flag = "Fly",
@@ -675,7 +943,7 @@ MoveTab:CreateToggle({
 -- ================================================
 local InfoTab = Window:CreateTab("ℹ Info", 4483362458)
 
-local YenParagraph = InfoTab:CreateParagraph({ Title = "💰 Currency", Content = "Carregando..." })
+local YenParagraph = InfoTab:CreateParagraph({ Title = "💰 Currency", Content = "Loading..." })
 
 task.spawn(function()
     local ls = Player:WaitForChild("leaderstats", 10)
@@ -710,4 +978,4 @@ InfoTab:CreateButton({ Name = "Reset Character",
 
 -- ================================================
 Rayfield:LoadConfiguration()
-print("[Sorcerer Scripts v11] Loaded!")
+print("[Sorcerer Scripts v13] Loaded!")
