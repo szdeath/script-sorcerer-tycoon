@@ -39,12 +39,13 @@ local function GetRemote(path)
     return obj
 end
 
-local LimitBreakRemote = GetRemote({"LimitBreaker", "LimitBreak"})
-local RebirthRemote    = GetRemote({"Tycoon",       "Rebirth"})
-local SpeedRemote      = GetRemote({"Movements",    "Speed"})
-local M1Remote         = GetRemote({"Skills",       "M1", "M1Attack"})
-local SkillRemote      = GetRemote({"Skills",       "SKill"})
-local AwakeningRemote  = GetRemote({"Skills",       "Awakening", "ActivateAwakening"})
+local LimitBreakRemote  = GetRemote({"LimitBreaker",      "LimitBreak"})
+local RebirthRemote     = GetRemote({"Tycoon",             "Rebirth"})
+local SpeedRemote       = GetRemote({"Movements",          "Speed"})
+local M1Remote          = GetRemote({"Skills",             "M1", "M1Attack"})
+local SkillRemote       = GetRemote({"Skills",             "SKill"})
+local AwakeningRemote   = GetRemote({"Skills",             "Awakening", "ActivateAwakening"})
+local EquipTechRemote   = GetRemote({"InnateTechniques",   "EquipTechnique"})
 
 -- ================================================
 -- BOSS ZONES
@@ -99,8 +100,6 @@ local State = {
 
 -- ================================================
 -- GOD MODE — Instant Respawn at Death Position
--- Saves CFrame where player died, calls
--- LoadCharacter(), then teleports back there.
 -- ================================================
 local godModeConns = {}
 local lastDeathPos = nil
@@ -136,7 +135,7 @@ local function StopGodMode()
 end
 
 local FlyVelocity, FlyGyro
-local farmThread    = nil
+local farmThread = nil
 
 -- ================================================
 -- DASH NO COOLDOWN
@@ -200,31 +199,111 @@ local function StopDashNoCD()
 end
 
 -- ================================================
--- AUTO AWAKENING
+-- AUTO AWAKENING ON LOW HP
 -- ================================================
+local function GetPlayerHealth()
+    local chars = workspace:FindFirstChild("Characters")
+    if not chars then return nil, nil end
+    local charFolder = chars:FindFirstChild(Player.Name)
+    if not charFolder then return nil, nil end
+    local stats = charFolder:FindFirstChild("Stats")
+    if not stats then return nil, nil end
+    local healthVal = stats:FindFirstChild("Health")
+    if not healthVal then return nil, nil end
+    return healthVal.Value, healthVal
+end
+
+local function FireAwakening()
+    if Character then
+        for _, fn in ipairs({"Cooldowns", "Cooldown"}) do
+            local f = Character:FindFirstChild(fn)
+            if f then
+                local awCD = f:FindFirstChild("AwakeningCooldown")
+                if awCD then pcall(function() awCD:Destroy() end) end
+            end
+        end
+    end
+    if AwakeningRemote then
+        pcall(function() AwakeningRemote:FireServer() end)
+    end
+end
+
+local awakeningThread = nil
 local function StartAutoAwakening()
     State.AutoAwakening = true
-    task.spawn(function()
+    if awakeningThread then return end
+    awakeningThread = task.spawn(function()
         while State.AutoAwakening do
-            if Character then
-                for _, fn in ipairs({"Cooldowns", "Cooldown"}) do
-                    local f = Character:FindFirstChild(fn)
-                    if f then
-                        local awCD = f:FindFirstChild("AwakeningCooldown")
-                        if awCD then pcall(function() awCD:Destroy() end) end
-                    end
-                end
-                if AwakeningRemote then
-                    pcall(function() AwakeningRemote:FireServer() end)
+            local hp, healthVal = GetPlayerHealth()
+            if hp and healthVal then
+                local maxHp = healthVal.MaxValue or hp
+                local stats = healthVal.Parent
+                local maxVal = stats and stats:FindFirstChild("MaxHealth")
+                if maxVal then maxHp = maxVal.Value end
+                if maxHp > 0 and (hp / maxHp) <= 0.20 then
+                    FireAwakening()
                 end
             end
             task.wait(0.1)
         end
+        awakeningThread = nil
     end)
 end
 
 local function StopAutoAwakening()
     State.AutoAwakening = false
+    awakeningThread = nil
+end
+
+-- ================================================
+-- BOSS SELECTION
+-- ================================================
+local selectedBossName = "Any"
+
+local function GetAllBossNames()
+    local names = {"Any"}
+    local bossMap = workspace:FindFirstChild("Map")
+    bossMap = bossMap and bossMap:FindFirstChild("Boss")
+    if bossMap then
+        for _, zone in ipairs(bossMap:GetChildren()) do
+            local bosses = zone:FindFirstChild("Bosses")
+            if bosses then
+                for _, boss in ipairs(bosses:GetChildren()) do
+                    local hum = boss:FindFirstChildOfClass("Humanoid")
+                    if hum then
+                        local name = boss.Name:gsub("%s*%d+%s*$",""):gsub("^%s*",""):gsub("%s*$","")
+                        local found = false
+                        for _, n in ipairs(names) do if n == name then found = true break end end
+                        if not found then table.insert(names, name) end
+                    end
+                end
+            end
+        end
+    end
+    if #names == 1 then table.insert(names, "(no bosses found)") end
+    return names
+end
+
+local function GetSelectedBoss()
+    local bossMap = workspace:FindFirstChild("Map")
+    bossMap = bossMap and bossMap:FindFirstChild("Boss")
+    if not bossMap then return nil, nil, nil end
+    for _, zone in ipairs(bossMap:GetChildren()) do
+        local bosses = zone:FindFirstChild("Bosses")
+        if bosses then
+            for _, boss in ipairs(bosses:GetChildren()) do
+                local hum = boss:FindFirstChildOfClass("Humanoid")
+                local hrp = boss:FindFirstChild("HumanoidRootPart")
+                if hum and hum.Health > 0 and hrp then
+                    local name = boss.Name:gsub("%s*%d+%s*$",""):gsub("^%s*",""):gsub("%s*$","")
+                    if selectedBossName == "Any" or name == selectedBossName then
+                        return boss, hum, hrp
+                    end
+                end
+            end
+        end
+    end
+    return nil, nil, nil
 end
 
 -- ================================================
@@ -264,129 +343,49 @@ local function StopDumpBoss()
 end
 
 -- ================================================
--- AUTO COLLECT YEN
+-- TYCOON DETECTION
+-- Path: workspace.Map.Tycoons.<TycoonName>
+-- Nomes: TycoonChoso, TycoonGojo, etc.
 -- ================================================
-local function StartAutoCollectYen()
-    State.AutoCollectYen = true
-    task.spawn(function()
-        while State.AutoCollectYen do
-            if HRP then
-                for _, obj in ipairs(workspace:GetDescendants()) do
-                    if not State.AutoCollectYen then break end
-                    if obj:IsA("ProximityPrompt") then
-                        local low = obj.Parent and obj.Parent.Name:lower() or ""
-                        local actionLow = obj.ActionText and obj.ActionText:lower() or ""
-                        if low:find("yen") or low:find("coin") or low:find("drop") or
-                           low:find("reward") or low:find("pickup") or low:find("collect") or
-                           low:find("cursed energy") or low:find("cursed finger") or
-                           low:find("remain") or low:find("relic") or low:find("orb") or
-                           actionLow:find("collect") or actionLow:find("pick") or
-                           actionLow:find("grab") then
-                            pcall(function() fireproximityprompt(obj) end)
-                        end
-                    end
-                    if obj:IsA("BasePart") then
-                        local low = obj.Name:lower()
-                        if low:find("yen") or low:find("coin") or low:find("drop") or
-                           low:find("pickup") or low:find("collect") or
-                           low:find("cursed energy") or low:find("cursed finger") then
-                            pcall(function() firetouchinterest(HRP, obj, 0) end)
-                            pcall(function() firetouchinterest(HRP, obj, 1) end)
-                        end
-                    end
-                end
-            end
-            task.wait(0.3)
-        end
-    end)
-end
-
--- ================================================
--- AUTO COLLECT BOSS DROPS
--- Watches Workspace > Map > Boss > Zone > Drops
--- When drops appear (boss dies), teleports to each
--- drop, fires ProximityPrompt (E key) to collect.
--- ================================================
-local DropZonePaths = {
-    {"Lac"},
-    {"Metro"},
-    {"Shibuya"},
-    {"WorldBoss"},
-}
-
-local function GetAllDropFolders()
-    local folders = {}
-    local bossMap = workspace:FindFirstChild("Map")
-    bossMap = bossMap and bossMap:FindFirstChild("Boss")
-    if not bossMap then return folders end
-    for _, zone in ipairs(DropZonePaths) do
-        local z = bossMap:FindFirstChild(zone[1])
-        if z then
-            local drops = z:FindFirstChild("Drops")
-            if drops then
-                table.insert(folders, drops)
-            end
-        end
-    end
-    return folders
-end
-
-local function CollectDrop(drop)
-    if not HRP then return end
-    -- Teleport to the drop
-    pcall(function()
-        HRP.CFrame = CFrame.new(drop.Position + Vector3.new(0, 3, 0))
-    end)
-    task.wait(0.1)
-    -- Fire all ProximityPrompts inside the drop (the "E" prompt)
-    for _, obj in ipairs(drop:GetDescendants()) do
-        if obj:IsA("ProximityPrompt") then
-            pcall(function() fireproximityprompt(obj) end)
-            task.wait(0.05)
-        end
-    end
-    -- Also try firetouchinterest on the drop itself
-    pcall(function() firetouchinterest(HRP, drop, 0) end)
-    pcall(function() firetouchinterest(HRP, drop, 1) end)
-end
-
-local function StartAutoCollectDrops()
-    State.AutoCollectDrops = true
-    task.spawn(function()
-        while State.AutoCollectDrops do
-            local folders = GetAllDropFolders()
-            for _, folder in ipairs(folders) do
-                if not State.AutoCollectDrops then break end
-                local drops = folder:GetChildren()
-                if #drops > 0 then
-                    local savedPos = HRP and HRP.CFrame
-                    for _, drop in ipairs(drops) do
-                        if not State.AutoCollectDrops then break end
-                        if drop:IsA("BasePart") or drop:IsA("Model") then
-                            CollectDrop(drop:IsA("Model") and (drop.PrimaryPart or drop:FindFirstChildOfClass("BasePart")) or drop)
-                        end
-                    end
-                    -- Return to last boss position after collecting
-                    if savedPos and HRP then
-                        pcall(function()
-                            HRP.CFrame = savedPos
-                        end)
-                    end
-                end
-            end
-            task.wait(0.5)
-        end
-    end)
-end
 local TycoonNames = {
-    "Choso","Gojo","Hanami","Jogo","Maki",
-    "Megumi","Nanami","Nobara","Todo","Toge","Toji","Yuji"
+    "TycoonChoso","TycoonGojo","TycoonHanami","TycoonJogo","TycoonMaki",
+    "TycoonMegumi","TycoonNanami","TycoonNobara","TycoonTodo","TycoonToge",
+    "TycoonToji","TycoonYuji"
 }
 
 local TycoonStateRemote = GetRemote({"Tycoon", "GetTycoonsState"})
+local ClaimRemote       = GetRemote({"Tycoon", "Claim"})
 local CurrentTycoon     = nil
 
+-- Lê o personagem selecionado pelo player
+-- workspace.Characters.<name>.Scripts.UIs.CharacterSelection.Selection
+local function GetSelectedCharacterName()
+    local chars = workspace:FindFirstChild("Characters")
+    if not chars then return nil end
+    for _, charFolder in ipairs(chars:GetChildren()) do
+        -- Verifica se é a pasta do player atual
+        local scripts = charFolder:FindFirstChild("Scripts")
+        local uis = scripts and scripts:FindFirstChild("UIs")
+        local sel = uis and uis:FindFirstChild("CharacterSelection")
+        local selVal = sel and sel:FindFirstChild("Selection")
+        if selVal and (selVal:IsA("StringValue") or selVal:IsA("ObjectValue")) then
+            -- Tenta confirmar que é o player atual pela pasta
+            local ownerVal = charFolder:FindFirstChild("Owner") or charFolder:FindFirstChild("Player")
+            if ownerVal and ((ownerVal:IsA("StringValue") and ownerVal.Value == Player.Name)
+               or (ownerVal:IsA("ObjectValue") and ownerVal.Value == Player)) then
+                return selVal.Value
+            end
+            -- Fallback: pasta tem mesmo nome que o player
+            if charFolder.Name == Player.Name or charFolder.Name:find(Player.Name) then
+                return selVal.Value
+            end
+        end
+    end
+    return nil
+end
+
 local function DetectMyTycoon()
+    -- Método 1: GetTycoonsState remote
     if TycoonStateRemote then
         local ok, result = pcall(function()
             return TycoonStateRemote:InvokeServer()
@@ -401,8 +400,23 @@ local function DetectMyTycoon()
             end
         end
     end
+
+    -- Método 2: lê CharacterSelection e monta o nome
+    -- "Gojo" → "TycoonGojo"
+    local charName = GetSelectedCharacterName()
+    if charName and type(charName) == "string" and charName ~= "" then
+        local tycoonName = "Tycoon" .. charName
+        local folder = workspace:FindFirstChild("Map")
+        folder = folder and folder:FindFirstChild("Tycoons")
+        if folder and folder:FindFirstChild(tycoonName) then
+            CurrentTycoon = tycoonName
+            return tycoonName
+        end
+    end
+
+    -- Método 3: scan por Owner/attribute
     local folder = workspace:FindFirstChild("Map")
-    folder = folder and folder:FindFirstChild("Tycoon")
+    folder = folder and folder:FindFirstChild("Tycoons")
     if folder then
         for _, name in ipairs(TycoonNames) do
             local t = folder:FindFirstChild(name)
@@ -426,6 +440,139 @@ local function DetectMyTycoon()
     return nil
 end
 
+-- Auto re-detect quando tycoon muda (troca de personagem)
+task.spawn(function()
+    while task.wait(5) do
+        if State.AutoCollectYen or State.AutoUpgrade then
+            local prev = CurrentTycoon
+            DetectMyTycoon()
+            if prev ~= CurrentTycoon and CurrentTycoon then
+                Rayfield:Notify({
+                    Title   = "✅ Tycoon detectada",
+                    Content = CurrentTycoon,
+                    Duration = 3,
+                })
+            end
+        end
+    end
+end)
+
+-- ================================================
+-- AUTO COLLECT YEN
+-- Path confirmado:
+-- workspace.Map.Tycoons.<TycoonName>.Base
+--   > Collector_Floor1_0 > Collector > TouchInterest
+-- ================================================
+local function StartAutoCollectYen()
+    State.AutoCollectYen = true
+    task.spawn(function()
+        while State.AutoCollectYen do
+            if HRP then
+                if not CurrentTycoon then DetectMyTycoon() end
+                if CurrentTycoon then
+                    local myTycoon = workspace:FindFirstChild("Map")
+                    myTycoon = myTycoon and myTycoon:FindFirstChild("Tycoons")
+                    myTycoon = myTycoon and myTycoon:FindFirstChild(CurrentTycoon)
+                    -- Se tycoon sumiu (regen/troca), reseta e continua
+                    if not myTycoon or not myTycoon.Parent then
+                        CurrentTycoon = nil
+                        task.wait(2)
+                        continue
+                    end
+                    local base = myTycoon:FindFirstChild("Base")
+                    if base then
+                        for _, folder in ipairs(base:GetChildren()) do
+                            if not State.AutoCollectYen then break end
+                            local col = folder:FindFirstChild("Collector")
+                            if col and col:IsA("BasePart") and col.Parent
+                               and col:FindFirstChild("TouchInterest") then
+                                pcall(function()
+                                    firetouchinterest(HRP, col, 0)
+                                    task.wait(0.1)
+                                    firetouchinterest(HRP, col, 1)
+                                end)
+                                task.wait(0.3)
+                            end
+                        end
+                    end
+                end
+            end
+            task.wait(1)
+        end
+    end)
+end
+
+-- ================================================
+-- AUTO COLLECT BOSS DROPS
+-- workspace.Map.Boss.<Zone>.Drops
+-- ================================================
+local DropZonePaths = {"Lac","Metro","Shibuya","WorldBoss"}
+
+local function GetAllDropFolders()
+    local folders = {}
+    local bossMap = workspace:FindFirstChild("Map")
+    bossMap = bossMap and bossMap:FindFirstChild("Boss")
+    if not bossMap then return folders end
+    for _, zone in ipairs(DropZonePaths) do
+        local z = bossMap:FindFirstChild(zone)
+        if z then
+            local drops = z:FindFirstChild("Drops")
+            if drops then table.insert(folders, drops) end
+        end
+    end
+    return folders
+end
+
+local function CollectDrop(drop)
+    if not HRP or not drop then return end
+    pcall(function()
+        HRP.CFrame = CFrame.new(drop.Position + Vector3.new(0, 3, 0))
+    end)
+    task.wait(0.1)
+    for _, obj in ipairs(drop:GetDescendants()) do
+        if obj:IsA("ProximityPrompt") then
+            pcall(function() fireproximityprompt(obj) end)
+            task.wait(0.05)
+        end
+    end
+    pcall(function() firetouchinterest(HRP, drop, 0) end)
+    pcall(function() firetouchinterest(HRP, drop, 1) end)
+end
+
+local function StartAutoCollectDrops()
+    State.AutoCollectDrops = true
+    task.spawn(function()
+        while State.AutoCollectDrops do
+            local folders = GetAllDropFolders()
+            for _, folder in ipairs(folders) do
+                if not State.AutoCollectDrops then break end
+                local drops = folder:GetChildren()
+                if #drops > 0 then
+                    local savedPos = HRP and HRP.CFrame
+                    for _, drop in ipairs(drops) do
+                        if not State.AutoCollectDrops then break end
+                        local part = drop:IsA("BasePart") and drop
+                            or (drop:IsA("Model") and (drop.PrimaryPart or drop:FindFirstChildOfClass("BasePart")))
+                        if part then CollectDrop(part) end
+                    end
+                    if savedPos and HRP then
+                        pcall(function() HRP.CFrame = savedPos end)
+                    end
+                end
+            end
+            task.wait(0.5)
+        end
+    end)
+end
+
+-- ================================================
+-- AUTO UPGRADE TYCOON
+-- Path confirmado:
+-- workspace.Map.Tycoons.<TycoonName>.Purshases
+--   > Door_Floor1_1 (pasta)
+--     > Button_Door_Floor1_1
+--       > base (BasePart + TouchInterest)
+-- ================================================
 local upgradeThread = nil
 local function StartAutoUpgrade()
     State.AutoUpgrade = true
@@ -433,42 +580,54 @@ local function StartAutoUpgrade()
         while State.AutoUpgrade do
             if not CurrentTycoon then DetectMyTycoon() end
             if CurrentTycoon and HRP then
-                local folder = workspace:FindFirstChild("Map")
-                folder = folder and folder:FindFirstChild("Tycoon")
-                local myTycoon = folder and folder:FindFirstChild(CurrentTycoon)
-                if myTycoon then
+                local myTycoon = workspace:FindFirstChild("Map")
+                myTycoon = myTycoon and myTycoon:FindFirstChild("Tycoons")
+                myTycoon = myTycoon and myTycoon:FindFirstChild(CurrentTycoon)
+                -- Se tycoon sumiu (regen/troca), reseta e espera
+                if not myTycoon or not myTycoon.Parent then
+                    CurrentTycoon = nil
+                    task.wait(2)
+                    continue
+                end
+                local purshases = myTycoon and myTycoon:FindFirstChild("Purshases")
+                if purshases and purshases.Parent then
                     local pads = {}
-                    for _, obj in ipairs(myTycoon:GetDescendants()) do
-                        if obj:IsA("BasePart") and
-                           obj.Name:sub(1, 14) == "Marker_Button_" and
-                           obj:FindFirstChild("TouchInterest") then
-                            table.insert(pads, obj)
+                    for _, folder in ipairs(purshases:GetChildren()) do
+                        if not folder.Parent then continue end
+                        for _, btn in ipairs(folder:GetChildren()) do
+                            if btn.Name:sub(1, 7) == "Button_" then
+                                local base = btn:FindFirstChild("base")
+                                if base and base:IsA("BasePart") and base.Parent
+                                   and base:FindFirstChild("TouchInterest") then
+                                    table.insert(pads, base)
+                                end
+                            end
                         end
                     end
+
+                    -- Ordena por Floor depois por índice final
                     table.sort(pads, function(a, b)
-                        local na = tonumber(a.Name:match("_(%d+)$")) or 0
-                        local nb = tonumber(b.Name:match("_(%d+)$")) or 0
-                        if na == nb then return a.Name < b.Name end
+                        local fa = tonumber(a.Parent.Name:match("Floor(%d+)")) or 0
+                        local fb = tonumber(b.Parent.Name:match("Floor(%d+)")) or 0
+                        if fa ~= fb then return fa < fb end
+                        local na = tonumber(a.Parent.Name:match("_(%d+)$")) or 0
+                        local nb = tonumber(b.Parent.Name:match("_(%d+)$")) or 0
                         return na < nb
                     end)
-                    local savedCFrame = HRP.CFrame
+
                     for _, pad in ipairs(pads) do
                         if not State.AutoUpgrade then break end
+                        -- Verifica se pad ainda existe (regen/troca de tycoon)
+                        if not pad.Parent then continue end
                         pcall(function()
-                            HRP.CFrame = CFrame.new(
-                                pad.Position.X,
-                                pad.Position.Y + pad.Size.Y / 2 + 2.5,
-                                pad.Position.Z
-                            )
-                            task.wait(0.05)
                             firetouchinterest(HRP, pad, 0)
-                            task.wait(0.05)
+                            task.wait(0.1)
                             firetouchinterest(HRP, pad, 1)
                         end)
-                        task.wait(0.1)
+                        task.wait(0.3)
                     end
-                    pcall(function() HRP.CFrame = savedCFrame end)
                 else
+                    CurrentTycoon = nil
                     DetectMyTycoon()
                 end
             end
@@ -488,14 +647,9 @@ end
 -- ================================================
 local function SpamSkills(boss, _, bossHRP)
     if SkillRemote then
-        -- ============================================================
-        -- SKILLS LIST — edit here to add/remove skills
-        -- Format: SkillRemote:FireServer("Character", "SkillName")
-        -- ============================================================
         pcall(function() SkillRemote:FireServer("Jogo", "Coffin of the Iron Mountain") end)
         -- ADD MORE SKILLS BELOW:
         -- pcall(function() SkillRemote:FireServer("Character", "SkillName") end)
-        -- ============================================================
     end
     if M1Remote then pcall(function() M1Remote:FireServer(bossHRP) end) end
     pcall(function()
@@ -516,6 +670,7 @@ end
 -- ================================================
 local function StartFarm()
     if farmThread then return end
+    StartAutoAwakening()
     farmThread = task.spawn(function()
         while State.AutoFarm do
             local boss, bossHum, bossHRP = GetSelectedBoss()
@@ -539,6 +694,7 @@ end
 local function StopFarm()
     State.AutoFarm = false
     farmThread = nil
+    StopAutoAwakening()
 end
 
 -- ================================================
@@ -634,7 +790,6 @@ Player.CharacterAdded:Connect(function(char)
     State.Flying = false
     State.Noclip = false
 
-    -- God Mode: teleport back to exact death position
     if State.GodMode and lastDeathPos then
         task.spawn(function()
             for _ = 1, 8 do
@@ -664,8 +819,8 @@ Player.CharacterAdded:Connect(function(char)
         Humanoid.WalkSpeed = State.WalkSpeed
         if SpeedRemote then pcall(function() SpeedRemote:FireServer(State.WalkSpeed) end) end
     end
-    if State.DashNoCD      then task.wait(1); StartDashNoCD()      end
-    if State.AutoAwakening then task.wait(1); StartAutoAwakening() end
+    if State.DashNoCD then task.wait(1); StartDashNoCD() end
+    if State.AutoFarm  then task.wait(1); StartFarm()    end
     if State.GodMode then
         for _, c in ipairs(godModeConns) do pcall(function() c:Disconnect() end) end
         godModeConns = {}
@@ -722,56 +877,6 @@ Instance.new("UICorner", logo).CornerRadius = UDim.new(1, 0)
 -- ================================================
 local FarmTab = Window:CreateTab("⚔ Main", 4483362458)
 
--- Boss name dropdown — scans actual boss models from all zones
-local selectedBossName = "Any"
-
-local function GetAllBossNames()
-    local names = {"Any"}
-    local bossMap = workspace:FindFirstChild("Map")
-    bossMap = bossMap and bossMap:FindFirstChild("Boss")
-    if bossMap then
-        for _, zone in ipairs(bossMap:GetChildren()) do
-            local bosses = zone:FindFirstChild("Bosses")
-            if bosses then
-                for _, boss in ipairs(bosses:GetChildren()) do
-                    local hum = boss:FindFirstChildOfClass("Humanoid")
-                    if hum then
-                        local name = boss.Name:gsub("%s*%d+%s*$", ""):gsub("^%s*",""):gsub("%s*$","")
-                        -- Avoid duplicates
-                        local found = false
-                        for _, n in ipairs(names) do if n == name then found = true break end end
-                        if not found then table.insert(names, name) end
-                    end
-                end
-            end
-        end
-    end
-    if #names == 1 then table.insert(names, "(no bosses found)") end
-    return names
-end
-
-local function GetSelectedBoss()
-    local bossMap = workspace:FindFirstChild("Map")
-    bossMap = bossMap and bossMap:FindFirstChild("Boss")
-    if not bossMap then return nil, nil, nil end
-    for _, zone in ipairs(bossMap:GetChildren()) do
-        local bosses = zone:FindFirstChild("Bosses")
-        if bosses then
-            for _, boss in ipairs(bosses:GetChildren()) do
-                local hum = boss:FindFirstChildOfClass("Humanoid")
-                local hrp = boss:FindFirstChild("HumanoidRootPart")
-                if hum and hum.Health > 0 and hrp then
-                    local name = boss.Name:gsub("%s*%d+%s*$",""):gsub("^%s*",""):gsub("%s*$","")
-                    if selectedBossName == "Any" or name == selectedBossName then
-                        return boss, hum, hrp
-                    end
-                end
-            end
-        end
-    end
-    return nil, nil, nil
-end
-
 local BossDropdown = FarmTab:CreateDropdown({
     Name          = "Select Boss",
     Options       = {"Any"},
@@ -782,18 +887,6 @@ local BossDropdown = FarmTab:CreateDropdown({
     end,
 })
 
-FarmTab:CreateButton({
-    Name = "🔄 Refresh Boss List",
-    Callback = function()
-        local names = GetAllBossNames()
-        BossDropdown:Refresh(names, false)
-        BossDropdown:Set("Any")
-        selectedBossName = "Any"
-        Rayfield:Notify({ Title = "✅ Updated", Content = (#names - 1) .. " bosses found.", Duration = 2 })
-    end,
-})
-
--- Load boss names on start
 task.spawn(function()
     task.wait(3)
     local names = GetAllBossNames()
@@ -824,10 +917,14 @@ task.spawn(function()
     end
 end)
 
-FarmTab:CreateToggle({
-    Name = "God Mode (Instant Respawn)", CurrentValue = false, Flag = "GodMode",
-    Callback = function(v)
-        if v then StartGodMode() else StopGodMode() end
+FarmTab:CreateButton({
+    Name = "🔄 Refresh Boss List",
+    Callback = function()
+        local names = GetAllBossNames()
+        BossDropdown:Refresh(names, false)
+        BossDropdown:Set("Any")
+        selectedBossName = "Any"
+        Rayfield:Notify({ Title = "✅ Updated", Content = (#names - 1) .. " bosses found.", Duration = 2 })
     end,
 })
 
@@ -849,6 +946,13 @@ FarmTab:CreateToggle({
     Callback = function(v)
         State.AutoFarm = v
         if v then StartFarm() else StopFarm() end
+    end,
+})
+
+FarmTab:CreateToggle({
+    Name = "God Mode (Instant Respawn)", CurrentValue = false, Flag = "GodMode",
+    Callback = function(v)
+        if v then StartGodMode() else StopGodMode() end
     end,
 })
 
@@ -948,7 +1052,6 @@ SkillTab:CreateButton({
 -- ADD MORE CHARACTERS BELOW IN THIS FORMAT:
 --
 -- SkillTab:CreateParagraph({ Title = "CharacterName", Content = "CharacterName Skills" })
---
 -- SkillTab:CreateButton({
 --     Name = "CharacterName — SkillName",
 --     Callback = function()
@@ -959,10 +1062,68 @@ SkillTab:CreateButton({
 -- })
 -- ============================================================
 
-SkillTab:CreateToggle({
-    Name = "Auto Awakening", CurrentValue = false, Flag = "AutoAwakening",
-    Callback = function(v)
-        if v then StartAutoAwakening() else StopAutoAwakening() end
+SkillTab:CreateParagraph({
+    Title   = "Innate Techniques",
+    Content = "Character Innate Techniques. You need unlock all First",
+})
+
+SkillTab:CreateButton({
+    Name = "Cursed Barrier",
+    Callback = function()
+        if not EquipTechRemote or not SkillRemote then
+            Rayfield:Notify({ Title = "❌ Error", Content = "Remote not found.", Duration = 3 })
+            return
+        end
+        task.spawn(function()
+            pcall(function() EquipTechRemote:FireServer("Reverse Cursed Technique", true) end)
+            task.wait(0.02)
+            pcall(function() EquipTechRemote:FireServer("Minor Reverse Flow", true) end)
+            task.wait(0.02)
+            pcall(function() EquipTechRemote:FireServer("Simple Domain", true) end)
+            task.wait(0.02)
+            pcall(function() EquipTechRemote:FireServer("Cursed Barrier", true) end)
+            task.wait(0.02)
+            pcall(function() EquipTechRemote:FireServer("Cursed Barrier", false) end)
+            task.wait(0.02)
+            pcall(function() SkillRemote:FireServer("Cursed Barrier", "Cursed Barrier", "InnateTechnique") end)
+            task.wait(0.02)
+            pcall(function() EquipTechRemote:FireServer("Cursed Barrier", true) end)
+            task.wait(0.02)
+            pcall(function() EquipTechRemote:FireServer("Reverse Cursed Technique", false) end)
+            task.wait(0.02)
+            pcall(function() EquipTechRemote:FireServer("Simple Domain", false) end)
+            Rayfield:Notify({ Title = "Cursed Barrier", Content = "Executed.", Duration = 2 })
+        end)
+    end,
+})
+
+SkillTab:CreateButton({
+    Name = "Minor Reverse Flow",
+    Callback = function()
+        if not EquipTechRemote or not SkillRemote then
+            Rayfield:Notify({ Title = "❌ Error", Content = "Remote not found.", Duration = 3 })
+            return
+        end
+        task.spawn(function()
+            pcall(function() EquipTechRemote:FireServer("Reverse Cursed Technique", true) end)
+            task.wait(0.02)
+            pcall(function() EquipTechRemote:FireServer("Minor Reverse Flow", true) end)
+            task.wait(0.02)
+            pcall(function() EquipTechRemote:FireServer("Simple Domain", true) end)
+            task.wait(0.02)
+            pcall(function() EquipTechRemote:FireServer("Cursed Barrier", true) end)
+            task.wait(0.02)
+            pcall(function() EquipTechRemote:FireServer("Minor Reverse Flow", false) end)
+            task.wait(0.02)
+            pcall(function() SkillRemote:FireServer("Minor Reverse Flow", "Minor Reverse Flow", "InnateTechnique") end)
+            task.wait(0.02)
+            pcall(function() EquipTechRemote:FireServer("Minor Reverse Flow", true) end)
+            task.wait(0.02)
+            pcall(function() EquipTechRemote:FireServer("Reverse Cursed Technique", false) end)
+            task.wait(0.02)
+            pcall(function() EquipTechRemote:FireServer("Simple Domain", false) end)
+            Rayfield:Notify({ Title = "Minor Reverse Flow", Content = "Executed.", Duration = 2 })
+        end)
     end,
 })
 
@@ -973,7 +1134,6 @@ local MoveTab = Window:CreateTab("🏃 Movement", 4483362458)
 
 -- ================================================
 -- TAB: TELEPORT
--- Dropdown to select player + one fixed button.
 -- ================================================
 local TpTab = Window:CreateTab("🔀 Teleport", 4483362458)
 
@@ -1005,7 +1165,11 @@ TpTab:CreateButton({
         TpDropdown:Set(list[1] or "(no players)")
         TpDropdown:Refresh(list, false)
         tpSelected = list[1] or ""
-        Rayfield:Notify({ Title = "✅ Updated", Content = (#list == 1 and list[1] == "(no players)" and "No players found." or (#list .. " players found.")), Duration = 2 })
+        Rayfield:Notify({
+            Title = "✅ Updated",
+            Content = (#list == 1 and list[1] == "(no players)") and "No players found." or (#list .. " players found."),
+            Duration = 2,
+        })
     end,
 })
 
@@ -1099,6 +1263,85 @@ MoveTab:CreateToggle({
 -- ================================================
 local InfoTab = Window:CreateTab("ℹ Info", 4483362458)
 
+-- Dropdown para selecionar tycoon manualmente (caso DetectMyTycoon falhe)
+InfoTab:CreateDropdown({
+    Name          = "Minha Tycoon (manual)",
+    Options       = TycoonNames,
+    CurrentOption = {TycoonNames[1]},
+    Flag          = "ManualTycoon",
+    Callback = function(v)
+        CurrentTycoon = v[1]
+        Rayfield:Notify({ Title = "✅ Tycoon definida", Content = CurrentTycoon, Duration = 3 })
+    end,
+})
+
+InfoTab:CreateButton({
+    Name = "🏠 Claim Tycoon Selecionada",
+    Callback = function()
+        if not CurrentTycoon then
+            Rayfield:Notify({ Title = "❌ Selecione uma tycoon primeiro", Content = "", Duration = 2 })
+            return
+        end
+        -- Claim remote usa o nome sem "Tycoon" prefix: "TycoonGojo" → "Gojo"
+        local charName = CurrentTycoon:gsub("^Tycoon", "")
+        if ClaimRemote then
+            local ok, err = pcall(function()
+                ClaimRemote:FireServer(charName)
+            end)
+            if ok then
+                Rayfield:Notify({ Title = "✅ Claim enviado", Content = charName, Duration = 3 })
+            else
+                Rayfield:Notify({ Title = "❌ Erro", Content = tostring(err), Duration = 4 })
+            end
+        else
+            Rayfield:Notify({ Title = "❌ Remote não encontrado", Content = "Tycoon.Claim", Duration = 3 })
+        end
+    end,
+})
+
+InfoTab:CreateButton({
+    Name = "🔍 Debug: Testar Tycoon",
+    Callback = function()
+        if not CurrentTycoon then DetectMyTycoon() end
+        local msg = "CurrentTycoon: " .. tostring(CurrentTycoon) .. "\n"
+        if CurrentTycoon then
+            local t = workspace:FindFirstChild("Map")
+            t = t and t:FindFirstChild("Tycoons")
+            t = t and t:FindFirstChild(CurrentTycoon)
+            if t then
+                local base = t:FindFirstChild("Base")
+                local pursh = t:FindFirstChild("Purshases")
+                -- contar collectors
+                local colCount = 0
+                if base then
+                    for _, folder in ipairs(base:GetChildren()) do
+                        if folder:FindFirstChild("Collector") then colCount += 1 end
+                    end
+                end
+                -- contar pads
+                local padCount = 0
+                if pursh then
+                    for _, folder in ipairs(pursh:GetChildren()) do
+                        for _, btn in ipairs(folder:GetChildren()) do
+                            if btn.Name:sub(1,7) == "Button_" and btn:FindFirstChild("base") then
+                                padCount += 1
+                            end
+                        end
+                    end
+                end
+                msg = msg .. "Base: " .. tostring(base ~= nil) .. "\n"
+                msg = msg .. "Collectors: " .. colCount .. "\n"
+                msg = msg .. "Purshases: " .. tostring(pursh ~= nil) .. "\n"
+                msg = msg .. "Pads: " .. padCount
+            else
+                msg = msg .. "Tycoon NÃO encontrada no workspace!"
+            end
+        end
+        Rayfield:Notify({ Title = "🔍 Debug", Content = msg, Duration = 8 })
+        print("[Debug Tycoon]", msg)
+    end,
+})
+
 local YenParagraph = InfoTab:CreateParagraph({ Title = "💰 Currency", Content = "Loading..." })
 
 task.spawn(function()
@@ -1134,4 +1377,4 @@ InfoTab:CreateButton({ Name = "Reset Character",
 
 -- ================================================
 Rayfield:LoadConfiguration()
-print("[Sorcerer Scripts v13] Loaded!")
+print("[Sorcerer Scripts v14] Loaded!")
