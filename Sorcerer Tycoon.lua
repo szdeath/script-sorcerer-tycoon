@@ -78,22 +78,23 @@ end
 -- STATE
 -- ================================================
 local State = {
-    AutoFarm      = false,
-    DumpBoss      = false,
-    Flying        = false,
-    Noclip        = false,
-    InfJump       = false,
-    SpeedHack     = false,
-    AutoLB        = false,
-    AutoRebirth   = false,
-    DashNoCD      = false,
-    AutoAwakening = false,
-    AutoCollectYen= false,
-    AutoUpgrade   = false,
-    GodMode       = false,
-    FlySpeed      = 80,
-    WalkSpeed     = 200,
-    LastBossPos   = nil,
+    AutoFarm        = false,
+    DumpBoss        = false,
+    Flying          = false,
+    Noclip          = false,
+    InfJump         = false,
+    SpeedHack       = false,
+    AutoLB          = false,
+    AutoRebirth     = false,
+    DashNoCD        = false,
+    AutoAwakening   = false,
+    AutoCollectYen  = false,
+    AutoUpgrade     = false,
+    AutoCollectDrops= false,
+    GodMode         = false,
+    FlySpeed        = 80,
+    WalkSpeed       = 200,
+    LastBossPos     = nil,
 }
 
 -- ================================================
@@ -233,7 +234,7 @@ local function StartDumpBoss()
     State.DumpBoss = true
     task.spawn(function()
         while State.DumpBoss do
-            local boss, bossHum = GetAnyBoss()
+            local boss, bossHum = GetSelectedBoss()
             if boss then
                 pcall(function()
                     for _, p in ipairs(boss:GetDescendants()) do
@@ -250,7 +251,7 @@ end
 
 local function StopDumpBoss()
     State.DumpBoss = false
-    local boss, bossHum = GetAnyBoss()
+    local boss, bossHum = GetSelectedBoss()
     if boss then
         pcall(function()
             for _, p in ipairs(boss:GetDescendants()) do
@@ -301,8 +302,82 @@ local function StartAutoCollectYen()
 end
 
 -- ================================================
--- AUTO UPGRADE TYCOON
+-- AUTO COLLECT BOSS DROPS
+-- Watches Workspace > Map > Boss > Zone > Drops
+-- When drops appear (boss dies), teleports to each
+-- drop, fires ProximityPrompt (E key) to collect.
 -- ================================================
+local DropZonePaths = {
+    {"Lac"},
+    {"Metro"},
+    {"Shibuya"},
+    {"WorldBoss"},
+}
+
+local function GetAllDropFolders()
+    local folders = {}
+    local bossMap = workspace:FindFirstChild("Map")
+    bossMap = bossMap and bossMap:FindFirstChild("Boss")
+    if not bossMap then return folders end
+    for _, zone in ipairs(DropZonePaths) do
+        local z = bossMap:FindFirstChild(zone[1])
+        if z then
+            local drops = z:FindFirstChild("Drops")
+            if drops then
+                table.insert(folders, drops)
+            end
+        end
+    end
+    return folders
+end
+
+local function CollectDrop(drop)
+    if not HRP then return end
+    -- Teleport to the drop
+    pcall(function()
+        HRP.CFrame = CFrame.new(drop.Position + Vector3.new(0, 3, 0))
+    end)
+    task.wait(0.1)
+    -- Fire all ProximityPrompts inside the drop (the "E" prompt)
+    for _, obj in ipairs(drop:GetDescendants()) do
+        if obj:IsA("ProximityPrompt") then
+            pcall(function() fireproximityprompt(obj) end)
+            task.wait(0.05)
+        end
+    end
+    -- Also try firetouchinterest on the drop itself
+    pcall(function() firetouchinterest(HRP, drop, 0) end)
+    pcall(function() firetouchinterest(HRP, drop, 1) end)
+end
+
+local function StartAutoCollectDrops()
+    State.AutoCollectDrops = true
+    task.spawn(function()
+        while State.AutoCollectDrops do
+            local folders = GetAllDropFolders()
+            for _, folder in ipairs(folders) do
+                if not State.AutoCollectDrops then break end
+                local drops = folder:GetChildren()
+                if #drops > 0 then
+                    local savedPos = HRP and HRP.CFrame
+                    for _, drop in ipairs(drops) do
+                        if not State.AutoCollectDrops then break end
+                        if drop:IsA("BasePart") or drop:IsA("Model") then
+                            CollectDrop(drop:IsA("Model") and (drop.PrimaryPart or drop:FindFirstChildOfClass("BasePart")) or drop)
+                        end
+                    end
+                    -- Return to last boss position after collecting
+                    if savedPos and HRP then
+                        pcall(function()
+                            HRP.CFrame = savedPos
+                        end)
+                    end
+                end
+            end
+            task.wait(0.5)
+        end
+    end)
+end
 local TycoonNames = {
     "Choso","Gojo","Hanami","Jogo","Maki",
     "Megumi","Nanami","Nobara","Todo","Toge","Toji","Yuji"
@@ -443,7 +518,7 @@ local function StartFarm()
     if farmThread then return end
     farmThread = task.spawn(function()
         while State.AutoFarm do
-            local boss, bossHum, bossHRP = GetAnyBoss()
+            local boss, bossHum, bossHRP = GetSelectedBoss()
             if boss and bossHRP then
                 State.LastBossPos = bossHRP.CFrame
                 if HRP then
@@ -647,12 +722,83 @@ Instance.new("UICorner", logo).CornerRadius = UDim.new(1, 0)
 -- ================================================
 local FarmTab = Window:CreateTab("⚔ Main", 4483362458)
 
-FarmTab:CreateToggle({
-    Name = "God Mode (Instant Respawn)", CurrentValue = false, Flag = "GodMode",
+-- Boss name dropdown — scans actual boss models from all zones
+local selectedBossName = "Any"
+
+local function GetAllBossNames()
+    local names = {"Any"}
+    local bossMap = workspace:FindFirstChild("Map")
+    bossMap = bossMap and bossMap:FindFirstChild("Boss")
+    if bossMap then
+        for _, zone in ipairs(bossMap:GetChildren()) do
+            local bosses = zone:FindFirstChild("Bosses")
+            if bosses then
+                for _, boss in ipairs(bosses:GetChildren()) do
+                    local hum = boss:FindFirstChildOfClass("Humanoid")
+                    if hum then
+                        local name = boss.Name:gsub("%s*%d+%s*$", ""):gsub("^%s*",""):gsub("%s*$","")
+                        -- Avoid duplicates
+                        local found = false
+                        for _, n in ipairs(names) do if n == name then found = true break end end
+                        if not found then table.insert(names, name) end
+                    end
+                end
+            end
+        end
+    end
+    if #names == 1 then table.insert(names, "(no bosses found)") end
+    return names
+end
+
+local function GetSelectedBoss()
+    local bossMap = workspace:FindFirstChild("Map")
+    bossMap = bossMap and bossMap:FindFirstChild("Boss")
+    if not bossMap then return nil, nil, nil end
+    for _, zone in ipairs(bossMap:GetChildren()) do
+        local bosses = zone:FindFirstChild("Bosses")
+        if bosses then
+            for _, boss in ipairs(bosses:GetChildren()) do
+                local hum = boss:FindFirstChildOfClass("Humanoid")
+                local hrp = boss:FindFirstChild("HumanoidRootPart")
+                if hum and hum.Health > 0 and hrp then
+                    local name = boss.Name:gsub("%s*%d+%s*$",""):gsub("^%s*",""):gsub("%s*$","")
+                    if selectedBossName == "Any" or name == selectedBossName then
+                        return boss, hum, hrp
+                    end
+                end
+            end
+        end
+    end
+    return nil, nil, nil
+end
+
+local BossDropdown = FarmTab:CreateDropdown({
+    Name          = "Select Boss",
+    Options       = {"Any"},
+    CurrentOption = {"Any"},
+    Flag          = "BossSelect",
     Callback = function(v)
-        if v then StartGodMode() else StopGodMode() end
+        selectedBossName = v[1] or "Any"
     end,
 })
+
+FarmTab:CreateButton({
+    Name = "🔄 Refresh Boss List",
+    Callback = function()
+        local names = GetAllBossNames()
+        BossDropdown:Refresh(names, false)
+        BossDropdown:Set("Any")
+        selectedBossName = "Any"
+        Rayfield:Notify({ Title = "✅ Updated", Content = (#names - 1) .. " bosses found.", Duration = 2 })
+    end,
+})
+
+-- Load boss names on start
+task.spawn(function()
+    task.wait(3)
+    local names = GetAllBossNames()
+    BossDropdown:Refresh(names, false)
+end)
 
 local StatusParagraph = FarmTab:CreateParagraph({
     Title = "Boss Status", Content = "Checking...",
@@ -660,32 +806,40 @@ local StatusParagraph = FarmTab:CreateParagraph({
 
 task.spawn(function()
     while task.wait(0.5) do
-        local boss, bossHum = GetAnyBoss()
+        local boss, bossHum = GetSelectedBoss()
         if boss and bossHum then
             local hp = math.floor(bossHum.Health)
             local mx = math.floor(bossHum.MaxHealth)
+            local bossName = boss.Name:gsub("%s*%d+%s*$",""):gsub("^%s*",""):gsub("%s*$","")
             StatusParagraph:Set({
-                Title   = "● " .. boss.Name .. "  ALIVE",
+                Title   = "● " .. bossName .. " — ALIVE",
                 Content = string.format("HP: %d / %d  (%.1f%%)", hp, mx, (hp/mx)*100),
             })
         else
             StatusParagraph:Set({
-                Title   = "All Boss defeated or not spawned",
-                Content = "Lac / Shibuya / Metro / WorldBoss",
+                Title   = "No boss active",
+                Content = selectedBossName == "Any" and "Lac / Shibuya / Metro / WorldBoss" or selectedBossName,
             })
         end
     end
 end)
 
+FarmTab:CreateToggle({
+    Name = "God Mode (Instant Respawn)", CurrentValue = false, Flag = "GodMode",
+    Callback = function(v)
+        if v then StartGodMode() else StopGodMode() end
+    end,
+})
+
 FarmTab:CreateButton({
     Name = "Teleport to Boss",
     Callback = function()
-        local _, _, bossHRP = GetAnyBoss()
+        local _, _, bossHRP = GetSelectedBoss()
         if bossHRP and HRP then
             HRP.CFrame = bossHRP.CFrame * CFrame.new(0, 0, 3)
-            Rayfield:Notify({ Title = "✅ Teleported", Content = "You In Boss.", Duration = 2 })
+            Rayfield:Notify({ Title = "✅ Teleported", Content = "You are at the Boss.", Duration = 2 })
         else
-            Rayfield:Notify({ Title = "❌ Boss not found", Content = "Wait boss spawn", Duration = 3 })
+            Rayfield:Notify({ Title = "❌ Boss not found", Content = "Wait for boss to spawn.", Duration = 3 })
         end
     end,
 })
@@ -710,6 +864,14 @@ FarmTab:CreateToggle({
     Name = "Auto Collect Yen", CurrentValue = false, Flag = "AutoCollectYen",
     Callback = function(v)
         if v then StartAutoCollectYen() else State.AutoCollectYen = false end
+    end,
+})
+
+FarmTab:CreateToggle({
+    Name = "Auto Collect Boss Drops", CurrentValue = false, Flag = "AutoCollectDrops",
+    Callback = function(v)
+        State.AutoCollectDrops = v
+        if v then StartAutoCollectDrops() end
     end,
 })
 
@@ -811,74 +973,68 @@ local MoveTab = Window:CreateTab("🏃 Movement", 4483362458)
 
 -- ================================================
 -- TAB: TELEPORT
+-- Dropdown to select player + one fixed button.
 -- ================================================
--- Rayfield does not support removing elements from a tab visually.
--- Solution: destroy the entire tab and recreate it on refresh.
-local TpTab = nil
+local TpTab = Window:CreateTab("🔀 Teleport", 4483362458)
 
-local function GetPlayerNames()
-    local names = {}
+local tpSelected = ""
+
+local function GetOtherPlayers()
+    local list = {}
     for _, p in ipairs(Players:GetPlayers()) do
-        if p ~= Player then
-            table.insert(names, p.Name)
+        if p ~= Player then table.insert(list, p.Name) end
+    end
+    if #list == 0 then list = {"(no players)"} end
+    return list
+end
+
+local TpDropdown = TpTab:CreateDropdown({
+    Name    = "Select Player",
+    Options = GetOtherPlayers(),
+    CurrentOption = {"(no players)"},
+    Flag    = "TpDropdown",
+    Callback = function(selected)
+        tpSelected = selected[1] or ""
+    end,
+})
+
+TpTab:CreateButton({
+    Name = "🔄 Update List",
+    Callback = function()
+        local list = GetOtherPlayers()
+        TpDropdown:Set(list[1] or "(no players)")
+        TpDropdown:Refresh(list, false)
+        tpSelected = list[1] or ""
+        Rayfield:Notify({ Title = "✅ Updated", Content = (#list == 1 and list[1] == "(no players)" and "No players found." or (#list .. " players found.")), Duration = 2 })
+    end,
+})
+
+TpTab:CreateButton({
+    Name = "Teleport to Player",
+    Callback = function()
+        if tpSelected == "" or tpSelected == "(no players)" then
+            Rayfield:Notify({ Title = "⚠️ No player selected", Content = "Select a player first.", Duration = 2 })
+            return
         end
-    end
-    return names
-end
+        local target = Players:FindFirstChild(tpSelected)
+        if target and target.Character then
+            local tHRP = target.Character:FindFirstChild("HumanoidRootPart")
+            if tHRP and HRP then
+                HRP.CFrame = tHRP.CFrame * CFrame.new(0, 0, 3)
+                Rayfield:Notify({ Title = "✅ Teleported", Content = "→ " .. tpSelected, Duration = 2 })
+                return
+            end
+        end
+        Rayfield:Notify({ Title = "❌ " .. tpSelected, Content = "Character not found.", Duration = 2 })
+    end,
+})
 
-local function BuildTeleportTab()
-    -- Destroy old tab if it exists
-    if TpTab then
-        pcall(function() TpTab:Destroy() end)
-        TpTab = nil
-    end
-
-    TpTab = Window:CreateTab("🔀 Teleport", 4483362458)
-
-    -- Update button always at the top
-    TpTab:CreateButton({
-        Name = "🔄 Update List",
-        Callback = function()
-            BuildTeleportTab()
-            Rayfield:Notify({ Title = "✅ List updated", Content = #GetPlayerNames() .. " players", Duration = 2 })
-        end,
-    })
-
-    local names = GetPlayerNames()
-    if #names == 0 then
-        TpTab:CreateParagraph({ Title = "No players online", Content = "Click Update List to refresh." })
-        return
-    end
-
-    for _, name in ipairs(names) do
-        local pName = name
-        TpTab:CreateButton({
-            Name = "➡ " .. pName,
-            Callback = function()
-                local target = Players:FindFirstChild(pName)
-                if target and target.Character then
-                    local tHRP = target.Character:FindFirstChild("HumanoidRootPart")
-                    if tHRP and HRP then
-                        HRP.CFrame = tHRP.CFrame * CFrame.new(0, 0, 3)
-                        Rayfield:Notify({ Title = "✅ Teleported", Content = "→ " .. pName, Duration = 2 })
-                    end
-                else
-                    Rayfield:Notify({ Title = "❌ " .. pName, Content = "Character not found.", Duration = 2 })
-                end
-            end,
-        })
-    end
-end
-
--- Build on load
 task.spawn(function()
     task.wait(2)
-    BuildTeleportTab()
+    local list = GetOtherPlayers()
+    TpDropdown:Refresh(list, false)
+    tpSelected = list[1] or ""
 end)
-
--- Auto rebuild when players join/leave
-Players.PlayerAdded:Connect(function() task.wait(0.5) BuildTeleportTab() end)
-Players.PlayerRemoving:Connect(function() task.wait(0.5) BuildTeleportTab() end)
 
 MoveTab:CreateToggle({
     Name = "Fly", CurrentValue = false, Flag = "Fly",
