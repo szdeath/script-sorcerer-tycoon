@@ -1,3 +1,4 @@
+
 -- ================================================
 -- SORCERER SCRIPTS - RAYFIELD UI v14
 -- Auto Farm | Dump Boss | Dash No CD
@@ -1870,6 +1871,15 @@ SkillTab:CreateButton({
             FireSkillWithAnimBypass(SkillRemote, "Gojo", "Lapse Blue")
         end
         Rayfield:Notify({ Title = "Gojo", Content = "Lapse Blue", Duration = 2 })
+    end,
+})
+SkillTab:CreateButton({
+    Name = "Volcanic Armageddon",
+    Callback = function()
+        if SkillRemote then
+            FireSkillWithAnimBypass(SkillRemote, "Jogo", "Volcanic Armageddon")
+        end
+        Rayfield:Notify({ Title = "Jogo", Content = "Volcanic Armageddon", Duration = 2 })
     end,
 })
 -- ================================================
