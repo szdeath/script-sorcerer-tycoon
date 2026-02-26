@@ -2498,7 +2498,7 @@ for _, zone in ipairs(ZoneStatusNames) do
                         end
                         Rayfield:Notify({
                             Title   = "✅ Teleported",
-                            Content = "→ " .. CleanBossName(boss.Name) .. " (" .. zoneLabel .. ")",
+                            Content = "" .. CleanBossName(boss.Name) .. " (" .. zoneLabel .. ")",
                             Duration = 2,
                         })
                         return
@@ -2546,13 +2546,13 @@ task.spawn(function()
                 end
                 if #aliveBosses > 0 then
                     para:Set({
-                        Title   = "● " .. zone.label .. " — " .. #aliveBosses .. " boss(es) alive",
+                        Title   = "● " .. zone.label .. " — " .. #aliveBosses .. " boss",
                         Content = table.concat(aliveBosses, "\n"),
                     })
                 else
                     para:Set({
                         Title   = "○ " .. zone.label,
-                        Content = "No boss alive — Teleport button disabled",
+                        Content = "No boss alive",
                     })
                 end
             end
@@ -2772,3 +2772,4 @@ InfoTab:CreateToggle({
 -- ================================================
 Rayfield:LoadConfiguration()
 print("[Sorcerer Scripts v21] Loaded!")
+
