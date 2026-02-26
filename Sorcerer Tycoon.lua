@@ -1,5 +1,5 @@
 -- ================================================
--- SORCERER SCRIPTS - RAYFIELD UI v14
+-- SORCERER SCRIPTS - RAYFIELD UI v21
 -- Auto Farm | Dump Boss | Dash No CD
 -- Skills | Auto Awakening | Movement
 -- ================================================
@@ -9,14 +9,14 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService  = game:GetService("UserInputService")
 local RunService        = game:GetService("RunService")
 
-print("[SorcererScript] Iniciando...")
+print("[SorcererScript] Starting...")
 
 local Player    = Players.LocalPlayer
 local Character = Player.Character or Player.CharacterAdded:Wait()
 local Humanoid  = Character:WaitForChild("Humanoid")
 local HRP       = Character:WaitForChild("HumanoidRootPart")
 
--- Sempre retorna o HRP atual (evita crash ao regenerar)
+-- Always returns current HRP (avoids crash on respawn)
 local function GetHRP()
     local char = Player.Character
     if not char then return nil end
@@ -32,7 +32,7 @@ if os.time() > expiry then
     })
     return
 end
-print("[SorcererScript] Expiração OK")
+print("[SorcererScript] Expiry OK")
 
 -- ================================================
 -- REMOTES
@@ -128,8 +128,51 @@ local State = {
 }
 
 -- ================================================
--- GOD MODE
+-- BOSS DROP FILTER
+-- Real item names confirmed from game:
+--   Yen       → "Yen"
+--   Energy    → "CursedEnergy", "Cursed Energy", etc.
+--   Fingers   → "CursedFingers", "CursedFinger", etc.
+--   Remains   → character name drop (e.g. "Nobara", "Toji") —
+--               anything that is NOT Yen/Energy/Fingers
 -- ================================================
+local BossDropFilter = {
+    Yen     = true,
+    Energy  = true,
+    Fingers = true,
+    Remains = true,
+}
+
+local YEN_PATTERNS     = {"Yen"}
+local ENERGY_PATTERNS  = {"CursedEnergy", "Cursed Energy", "cursed_energy", "CursedEnergie"}
+local FINGERS_PATTERNS = {"CursedFingers", "CursedFinger", "Cursed Fingers", "Cursed Finger"}
+
+local function IsYen(name)
+    for _, p in ipairs(YEN_PATTERNS) do
+        if string.find(name, p, 1, true) then return true end
+    end
+    return false
+end
+local function IsEnergy(name)
+    for _, p in ipairs(ENERGY_PATTERNS) do
+        if string.find(name, p, 1, true) then return true end
+    end
+    return false
+end
+local function IsFingers(name)
+    for _, p in ipairs(FINGERS_PATTERNS) do
+        if string.find(name, p, 1, true) then return true end
+    end
+    return false
+end
+
+local function BossDropPassesFilter(itemName)
+    if IsYen(itemName)     then return BossDropFilter.Yen end
+    if IsEnergy(itemName)  then return BossDropFilter.Energy end
+    if IsFingers(itemName) then return BossDropFilter.Fingers end
+    -- Everything else is a character remain (e.g. "Nobara", "Toji")
+    return BossDropFilter.Remains
+end
 local godModeConns = {}
 local lastDeathPos = nil
 
@@ -162,6 +205,7 @@ end
 
 local FlyVelocity, FlyGyro
 local farmThread = nil
+local CurrentFarmStatus = "Idle" -- updated in real-time by StartFarm
 
 -- ================================================
 -- DASH NO COOLDOWN
@@ -278,34 +322,8 @@ local function StopAutoAwakening()
 end
 
 -- ================================================
--- BOSS SELECTION
+-- BOSS SELECTION (no dropdown — always scan all zones)
 -- ================================================
-local selectedBossName = "Any"
-
-local function GetAllBossNames()
-    local names = {"Any"}
-    local bossMap = workspace:FindFirstChild("Map")
-    bossMap = bossMap and bossMap:FindFirstChild("Boss")
-    if bossMap then
-        for _, zone in ipairs(bossMap:GetChildren()) do
-            local bosses = zone:FindFirstChild("Bosses")
-            if bosses then
-                for _, boss in ipairs(bosses:GetChildren()) do
-                    local hum = boss:FindFirstChildOfClass("Humanoid")
-                    if hum then
-                        local name = CleanBossName(boss.Name)
-                        local found = false
-                        for _, n in ipairs(names) do if n == name then found = true break end end
-                        if not found then table.insert(names, name) end
-                    end
-                end
-            end
-        end
-    end
-    if #names == 1 then table.insert(names, "(no bosses found)") end
-    return names
-end
-
 local function GetSelectedBoss()
     local bossMap = workspace:FindFirstChild("Map")
     bossMap = bossMap and bossMap:FindFirstChild("Boss")
@@ -317,10 +335,7 @@ local function GetSelectedBoss()
                 local hum = boss:FindFirstChildOfClass("Humanoid")
                 local hrp = boss:FindFirstChild("HumanoidRootPart")
                 if hum and hum.Health > 0 and hrp then
-                    local name = CleanBossName(boss.Name)
-                    if selectedBossName == "Any" or name == selectedBossName then
-                        return boss, hum, hrp
-                    end
+                    return boss, hum, hrp
                 end
             end
         end
@@ -468,7 +483,7 @@ local function HookClaimRemote()
                         if TycoonParagraph then
                             pcall(function()
                                 TycoonParagraph:Set({
-                                    Title   = "🏯 Minha Tycoon",
+                                    Title   = "🏯 My Tycoon",
                                     Content = charName .. " (auto)",
                                 })
                             end)
@@ -537,6 +552,8 @@ local function StartAutoCollectDrops()
     State.AutoCollectDrops = true
     task.spawn(function()
         while State.AutoCollectDrops do
+            -- When AutoFarm is active, the farm loop handles collection — skip here
+            if State.AutoFarm then task.wait(1) continue end
             local currentHRP = Player.Character and Player.Character:FindFirstChild("HumanoidRootPart")
             if not currentHRP then
                 task.wait(1)
@@ -555,6 +572,8 @@ local function StartAutoCollectDrops()
                     for _, item in ipairs(drops:GetChildren()) do
                         if not State.AutoCollectDrops then break end
                         if not item or not item.Parent then continue end
+                        -- Apply drop filter
+                        if not BossDropPassesFilter(item.Name) then continue end
                         currentHRP = Player.Character and Player.Character:FindFirstChild("HumanoidRootPart")
                         if not currentHRP then break end
 
@@ -698,221 +717,87 @@ local function SpamSkills(boss, _, bossHRP)
 end
 
 -- ================================================
--- FARM LOOP
+-- ZONE BOSS FARM
 -- ================================================
-local function StartFarm()
-    if farmThread then return end
-    StartAutoAwakening()
-    farmThread = task.spawn(function()
-        while State.AutoFarm do
-            local boss, bossHum, bossHRP = GetSelectedBoss()
-            if not boss or not bossHRP then
-                task.wait(1)
-                continue
-            end
+-- FIX: Shibuya boss is inside the portal (X < -1200).
+-- We teleport via portal exit then directly to the boss HRP.
+-- ZoneFarmPositions used only for non-portal zones.
+local ZoneFarmPositions = {
+    Lac      = Vector3.new(769.228,  20.658, -396.690),
+    Metro    = Vector3.new(23.011,  -68.810,  80.006),
+    WorldBoss= Vector3.new(663.488,  30.504,  610.792),
+}
+-- Zones that are inside the Shibuya portal (X < SHIBUYA_THRESHOLD_X)
+local ZoneNeedsPortal = { Shibuya = true }
+local ZoneOrder = {"Lac", "Metro", "Shibuya", "WorldBoss"}
 
-            local bossZone = nil
-            local bossMap = workspace:FindFirstChild("Map")
-            local bossMapBoss = bossMap and bossMap:FindFirstChild("Boss")
-            if bossMapBoss then
-                for _, zone in ipairs(bossMapBoss:GetChildren()) do
-                    local bosses = zone:FindFirstChild("Bosses")
-                    if bosses and bosses:IsAncestorOf(boss) then
-                        bossZone = zone
-                        break
-                    end
-                end
-            end
-
-            while State.AutoFarm and boss.Parent and bossHum and bossHum.Health > 0 do
-                State.LastBossPos = bossHRP.CFrame
-                local HRP = GetHRP()
-                if HRP then
-                    pcall(function()
-                        TeleportToBossPos(bossHRP)
-                    end)
-                end
-                SpamSkills(boss, bossHum, bossHRP)
-                if State.DashNoCD then ClearDashCD() end
-                task.wait(0.1)
-            end
-
-            if not State.AutoFarm then break end
-
-            if bossZone then
-                local drops = bossZone:FindFirstChild("Drops")
-                if drops then
-                    local waited = 0
-                    while #drops:GetChildren() == 0 and waited < 3 do
-                        task.wait(0.2)
-                        waited += 0.2
-                    end
-                    local timeout = 0
-                    while #drops:GetChildren() > 0 and timeout < 15 do
-                        task.wait(0.3)
-                        timeout += 0.3
-                    end
-                end
-            end
-
-            task.wait(0.5)
-        end
-        farmThread = nil
-    end)
-end
-
-local function StopFarm()
-    State.AutoFarm = false
-    farmThread = nil
-    StopAutoAwakening()
-end
-
--- ================================================
--- FLY
--- ================================================
-local function StartFly()
-    Character = Player.Character
-    if not Character then return end
-    HRP      = Character:FindFirstChild("HumanoidRootPart")
-    Humanoid = Character:FindFirstChildOfClass("Humanoid")
-    if Humanoid then Humanoid.PlatformStand = true end
-    FlyVelocity = Instance.new("BodyVelocity")
-    FlyVelocity.MaxForce = Vector3.new(1e6, 1e6, 1e6)
-    FlyVelocity.Velocity  = Vector3.zero
-    FlyVelocity.Parent    = HRP
-    FlyGyro = Instance.new("BodyGyro")
-    FlyGyro.MaxTorque = Vector3.new(1e6, 1e6, 1e6)
-    FlyGyro.D = 100
-    FlyGyro.Parent = HRP
-    RunService:BindToRenderStep("SorcFly", Enum.RenderPriority.Input.Value, function()
-        if not State.Flying or not HRP then return end
-        local cam = workspace.CurrentCamera
-        local dir = Vector3.zero
-        if UserInputService:IsKeyDown(Enum.KeyCode.W)           then dir += cam.CFrame.LookVector  end
-        if UserInputService:IsKeyDown(Enum.KeyCode.S)           then dir -= cam.CFrame.LookVector  end
-        if UserInputService:IsKeyDown(Enum.KeyCode.A)           then dir -= cam.CFrame.RightVector end
-        if UserInputService:IsKeyDown(Enum.KeyCode.D)           then dir += cam.CFrame.RightVector end
-        if UserInputService:IsKeyDown(Enum.KeyCode.Space)       then dir += Vector3.new(0, 1, 0)  end
-        if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then dir -= Vector3.new(0, 1, 0)  end
-        FlyVelocity.Velocity = dir.Magnitude > 0 and dir.Unit * State.FlySpeed or Vector3.zero
-        FlyGyro.CFrame = cam.CFrame
-    end)
-end
-
-local function StopFly()
-    State.Flying = false
-    RunService:UnbindFromRenderStep("SorcFly")
-    if FlyVelocity then FlyVelocity:Destroy(); FlyVelocity = nil end
-    if FlyGyro     then FlyGyro:Destroy();     FlyGyro     = nil end
-    local hum = Character and Character:FindFirstChildOfClass("Humanoid")
-    if hum then hum.PlatformStand = false end
-end
-
--- ================================================
--- RUNTIME LOOPS
--- ================================================
-RunService.Stepped:Connect(function()
-    if State.Noclip and Character then
-        for _, p in ipairs(Character:GetDescendants()) do
-            if p:IsA("BasePart") then p.CanCollide = false end
+local function GetBossInZone(zoneName)
+    local bossMap = workspace:FindFirstChild("Map")
+    bossMap = bossMap and bossMap:FindFirstChild("Boss")
+    local zone = bossMap and bossMap:FindFirstChild(zoneName)
+    if not zone then return nil, nil, nil end
+    local bosses = zone:FindFirstChild("Bosses")
+    if not bosses then return nil, nil, nil end
+    for _, boss in ipairs(bosses:GetChildren()) do
+        local hum = boss:FindFirstChildOfClass("Humanoid")
+        local hrp = boss:FindFirstChild("HumanoidRootPart")
+        if hum and hum.Health > 0 and hrp then
+            return boss, hum, hrp
         end
     end
-    if State.SpeedHack and Humanoid and Humanoid.WalkSpeed ~= State.WalkSpeed then
-        Humanoid.WalkSpeed = State.WalkSpeed
-    end
-end)
+    return nil, nil, nil
+end
 
-UserInputService.JumpRequest:Connect(function()
-    if State.InfJump and Character then
-        local hum = Character:FindFirstChildOfClass("Humanoid")
-        if hum then hum:ChangeState(Enum.HumanoidStateType.Jumping) end
-    end
-end)
+local function CollectZoneDrops(zoneName)
+    local bossMap = workspace:FindFirstChild("Map")
+    bossMap = bossMap and bossMap:FindFirstChild("Boss")
+    local zone = bossMap and bossMap:FindFirstChild(zoneName)
+    if not zone then return end
+    local drops = zone:FindFirstChild("Drops")
+    if not drops or #drops:GetChildren() == 0 then return end
 
-task.spawn(function()
-    while task.wait(5) do
-        if State.AutoRebirth and RebirthRemote then
-            pcall(function() RebirthRemote:FireServer() end)
-        end
-    end
-end)
+    local currentHRP = Player.Character and Player.Character:FindFirstChild("HumanoidRootPart")
+    if not currentHRP then return end
 
--- ================================================
--- SUPRESSOR DE NOTIFICAÇÃO "Tycoon not complete"
--- ================================================
-task.spawn(function()
-    local playerGui = Player:WaitForChild("PlayerGui", 10)
-    if not playerGui then return end
+    for _, item in ipairs(drops:GetChildren()) do
+        if not item or not item.Parent then continue end
+        if not BossDropPassesFilter(item.Name) then continue end
 
-    local function checkAndSuppress(gui)
-        if not gui or not gui.Parent then return end
+        currentHRP = Player.Character and Player.Character:FindFirstChild("HumanoidRootPart")
+        if not currentHRP then break end
+
+        local part = item:IsA("BasePart") and item or item:FindFirstChildOfClass("BasePart")
+        if not part or not part.Parent then continue end
+
+        local prompt = item:FindFirstChild("Prompt")
+        if not prompt then continue end
+
+        pcall(function()
+            prompt.MaxActivationDistance = math.huge
+            prompt.HoldDuration = 0
+        end)
+        pcall(function()
+            currentHRP.CFrame = CFrame.new(part.Position + Vector3.new(0, 3, 0))
+        end)
+        task.wait(0.1)
+
+        if not item.Parent then continue end
+
+        pcall(function() fireproximityprompt(prompt) end)
         task.wait(0.05)
-        if not gui.Parent then return end
-        for _, v in ipairs(gui:GetDescendants()) do
-            if v:IsA("TextLabel") or v:IsA("TextBox") or v:IsA("TextButton") then
-                local t = v.Text:lower()
-                if t:find("tycoon not complete") or t:find("not complete %(") then
-                    pcall(function() gui:Destroy() end)
-                    return
-                end
-            end
+        pcall(function()
+            firetouchinterest(currentHRP, part, 0)
+            task.wait(0.03)
+            firetouchinterest(currentHRP, part, 1)
+        end)
+
+        local t = 0
+        while item.Parent and t < 0.3 do
+            task.wait(0.05)
+            t += 0.05
         end
     end
-
-    playerGui.ChildAdded:Connect(checkAndSuppress)
-    pcall(function()
-        game:GetService("CoreGui").ChildAdded:Connect(checkAndSuppress)
-    end)
-end)
-
--- ================================================
--- RESPAWN HANDLER
--- ================================================
-Player.CharacterAdded:Connect(function(char)
-    Character = char
-    Humanoid  = char:WaitForChild("Humanoid")
-    HRP       = char:WaitForChild("HumanoidRootPart")
-    State.Flying = false
-    State.Noclip = false
-
-    if State.GodMode and lastDeathPos then
-        task.spawn(function()
-            for _ = 1, 8 do
-                task.wait(0.1)
-                local HRP = GetHRP()
-                if HRP then pcall(function() HRP.CFrame = lastDeathPos end) end
-            end
-        end)
-    elseif State.AutoFarm and State.LastBossPos then
-        task.spawn(function()
-            for _ = 1, 5 do
-                task.wait(0.2)
-                local _, _, freshHRP = GetAnyBoss()
-                local HRP = GetHRP()
-                if HRP then
-                    HRP.CFrame = freshHRP
-                        and freshHRP.CFrame * CFrame.new(0, 0, 3)
-                        or  State.LastBossPos * CFrame.new(0, 0, 3)
-                end
-            end
-            if State.AutoFarm then StartFarm() end
-        end)
-    end
-
-    if State.SpeedHack then
-        task.wait(1.5)
-        Humanoid.WalkSpeed = State.WalkSpeed
-        if SpeedRemote then pcall(function() SpeedRemote:FireServer(State.WalkSpeed) end) end
-    end
-    if State.DashNoCD then task.wait(1); StartDashNoCD() end
-    if State.AutoFarm  then task.wait(1); StartFarm()    end
-    if State.GodMode then
-        for _, c in ipairs(godModeConns) do pcall(function() c:Disconnect() end) end
-        godModeConns = {}
-        task.wait(0.5)
-        ApplyGodModeToChar(char)
-    end
-end)
+end
 
 -- ================================================
 -- KILL AURA
@@ -1096,6 +981,323 @@ local function StopExtendHitbox()
 end
 
 -- ================================================
+-- AUTO FARM
+-- ================================================
+
+-- Find the Shibuya portal part in workspace to firetouchinterest on it
+local function GetShibuyaPortalPart()
+    -- Try common paths where the portal trigger might live
+    local map = workspace:FindFirstChild("Map")
+    if map then
+        for _, path in ipairs({
+            {"Portals", "Shibuya"},
+            {"Portal", "Shibuya"},
+            {"Shibuya", "Portal"},
+            {"Boss", "Shibuya", "Portal"},
+        }) do
+            local obj = map
+            for _, k in ipairs(path) do
+                obj = obj and obj:FindFirstChild(k)
+            end
+            if obj then
+                local part = obj:IsA("BasePart") and obj or obj:FindFirstChildOfClass("BasePart")
+                if part then return part end
+            end
+        end
+    end
+    return nil
+end
+
+-- Teleport to a boss — exact same logic as the Teleport tab buttons.
+-- For Shibuya (boss X < -1200):
+--   1. CFrame player to PORTAL_EXIT (inside Shibuya space)
+--   2. Short wait for game to register zone
+--   3. CFrame directly onto boss
+-- For all other zones: direct CFrame onto boss.
+local function TeleportToBossHRP(bossHRP)
+    if not bossHRP then return end
+    local hrp = GetHRP()
+    if not hrp then return end
+
+    if bossHRP.Position.X < SHIBUYA_THRESHOLD_X then
+        if not IsInShibuya() then
+            -- Teleport to inside Shibuya via the exit/interior spawn point
+            pcall(function()
+                hrp.CFrame = CFrame.new(SHIBUYA_PORTAL_EXIT + Vector3.new(0, 5, 0))
+            end)
+            task.wait(0.5)
+            local freshHRP = GetHRP()
+            if freshHRP then
+                hrp = freshHRP
+            end
+        end
+        -- Now snap directly onto boss
+        pcall(function()
+            hrp.CFrame = bossHRP.CFrame * CFrame.new(0, 0, 3)
+        end)
+    else
+        pcall(function()
+            hrp.CFrame = bossHRP.CFrame * CFrame.new(0, 0, 3)
+        end)
+    end
+    task.wait(0.15)
+end
+
+local function StartFarm()
+    if farmThread then return end
+    State.AutoFarm = true
+    State.ExtendHitbox = true
+    State.HitboxSize = 10000
+    StartExtendHitbox()
+    CurrentFarmStatus = "Searching for boss..."
+
+    farmThread = task.spawn(function()
+        while State.AutoFarm do
+
+            -- ── 1. FIND A BOSS ──────────────────────────────────────
+            local foundZone = nil
+            local boss, bossHum, bossHRP = nil, nil, nil
+
+            for _, zoneName in ipairs(ZoneOrder) do
+                local b, bh, bhrp = GetBossInZone(zoneName)
+                if b then
+                    boss, bossHum, bossHRP = b, bh, bhrp
+                    foundZone = zoneName
+                    break
+                end
+            end
+
+            if not boss then
+                CurrentFarmStatus = "⏳ Waiting for a boss to spawn..."
+                task.wait(1)
+                continue
+            end
+
+            local bossDisplayName = CleanBossName(boss.Name)
+
+            -- ── 2. TELEPORT TO BOSS ──────────────────────────────────
+            CurrentFarmStatus = "🔀 Teleporting to: " .. bossDisplayName .. " [" .. foundZone .. "]"
+            TeleportToBossHRP(bossHRP)
+
+            -- ── 3. DUMP BOSS if toggle ON ────────────────────────────
+            if State.DumpBoss then
+                pcall(function()
+                    for _, p in ipairs(boss:GetDescendants()) do
+                        if p:IsA("BasePart") then p.Anchored = true end
+                        if p:IsA("Script")   then p.Disabled = true end
+                    end
+                    if bossHum then bossHum.WalkSpeed = 0; bossHum.JumpPower = 0 end
+                end)
+            end
+
+            -- ── 4. FARM LOOP ─────────────────────────────────────────
+            CurrentFarmStatus = "🗡 Farming: " .. bossDisplayName .. " [" .. foundZone .. "]"
+            local farmTick = 0
+            while State.AutoFarm do
+                if not boss or not boss.Parent then break end
+                local currentHum = boss:FindFirstChildOfClass("Humanoid")
+                if not currentHum or currentHum.Health <= 0 then break end
+
+                State.LastBossPos = bossHRP.CFrame
+                SpamSkills(boss, currentHum, bossHRP)
+                if State.DashNoCD then ClearDashCD() end
+                farmTick += 1
+
+                -- Re-teleport every 3 seconds to stay close to boss
+                if farmTick % 30 == 0 then
+                    TeleportToBossHRP(bossHRP)
+                end
+
+                task.wait(0.1)
+            end
+
+            if not State.AutoFarm then break end
+
+            -- ── 5. COLLECT DROPS (only if toggle ON) ─────────────────
+            -- Do this BEFORE searching for next boss
+            CurrentFarmStatus = "✅ Defeated: " .. bossDisplayName
+            if State.AutoCollectDrops and foundZone then
+                CurrentFarmStatus = "🎁 Collecting drops [" .. foundZone .. "]..."
+                local bossMapC = workspace:FindFirstChild("Map")
+                local bossZoneC = bossMapC and bossMapC:FindFirstChild("Boss")
+                local zoneFolderC = bossZoneC and bossZoneC:FindFirstChild(foundZone)
+                local dropsC = zoneFolderC and zoneFolderC:FindFirstChild("Drops")
+                if dropsC then
+                    local waited = 0
+                    while #dropsC:GetChildren() == 0 and waited < 3 do
+                        task.wait(0.2); waited += 0.2
+                    end
+                end
+                CollectZoneDrops(foundZone)
+            end
+
+            -- ── 6. WAIT for corpse to clear, then find next boss ─────
+            CurrentFarmStatus = "🔍 Looking for next boss..."
+            task.wait(1) -- give game time to remove corpse / respawn boss
+        end
+
+        CurrentFarmStatus = "Idle"
+        StopExtendHitbox()
+        farmThread = nil
+    end)
+end
+
+local function StopFarm()
+    State.AutoFarm = false
+    farmThread = nil
+    CurrentFarmStatus = "Idle"
+    StopExtendHitbox()
+    StopAutoAwakening()
+end
+
+-- ================================================
+-- FLY
+-- ================================================
+local function StartFly()
+    Character = Player.Character
+    if not Character then return end
+    HRP      = Character:FindFirstChild("HumanoidRootPart")
+    Humanoid = Character:FindFirstChildOfClass("Humanoid")
+    if Humanoid then Humanoid.PlatformStand = true end
+    FlyVelocity = Instance.new("BodyVelocity")
+    FlyVelocity.MaxForce = Vector3.new(1e6, 1e6, 1e6)
+    FlyVelocity.Velocity  = Vector3.zero
+    FlyVelocity.Parent    = HRP
+    FlyGyro = Instance.new("BodyGyro")
+    FlyGyro.MaxTorque = Vector3.new(1e6, 1e6, 1e6)
+    FlyGyro.D = 100
+    FlyGyro.Parent = HRP
+    RunService:BindToRenderStep("SorcFly", Enum.RenderPriority.Input.Value, function()
+        if not State.Flying or not HRP then return end
+        local cam = workspace.CurrentCamera
+        local dir = Vector3.zero
+        if UserInputService:IsKeyDown(Enum.KeyCode.W)           then dir += cam.CFrame.LookVector  end
+        if UserInputService:IsKeyDown(Enum.KeyCode.S)           then dir -= cam.CFrame.LookVector  end
+        if UserInputService:IsKeyDown(Enum.KeyCode.A)           then dir -= cam.CFrame.RightVector end
+        if UserInputService:IsKeyDown(Enum.KeyCode.D)           then dir += cam.CFrame.RightVector end
+        if UserInputService:IsKeyDown(Enum.KeyCode.Space)       then dir += Vector3.new(0, 1, 0)  end
+        if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then dir -= Vector3.new(0, 1, 0)  end
+        FlyVelocity.Velocity = dir.Magnitude > 0 and dir.Unit * State.FlySpeed or Vector3.zero
+        FlyGyro.CFrame = cam.CFrame
+    end)
+end
+
+local function StopFly()
+    State.Flying = false
+    RunService:UnbindFromRenderStep("SorcFly")
+    if FlyVelocity then FlyVelocity:Destroy(); FlyVelocity = nil end
+    if FlyGyro     then FlyGyro:Destroy();     FlyGyro     = nil end
+    local hum = Character and Character:FindFirstChildOfClass("Humanoid")
+    if hum then hum.PlatformStand = false end
+end
+
+-- ================================================
+-- RUNTIME LOOPS
+-- ================================================
+RunService.Stepped:Connect(function()
+    if State.Noclip and Character then
+        for _, p in ipairs(Character:GetDescendants()) do
+            if p:IsA("BasePart") then p.CanCollide = false end
+        end
+    end
+    if State.SpeedHack and Humanoid and Humanoid.WalkSpeed ~= State.WalkSpeed then
+        Humanoid.WalkSpeed = State.WalkSpeed
+    end
+end)
+
+UserInputService.JumpRequest:Connect(function()
+    if State.InfJump and Character then
+        local hum = Character:FindFirstChildOfClass("Humanoid")
+        if hum then hum:ChangeState(Enum.HumanoidStateType.Jumping) end
+    end
+end)
+
+task.spawn(function()
+    while task.wait(5) do
+        if State.AutoRebirth and RebirthRemote then
+            pcall(function() RebirthRemote:FireServer() end)
+        end
+    end
+end)
+
+-- ================================================
+-- NOTIFICATION SUPPRESSOR "Tycoon not complete"
+-- ================================================
+task.spawn(function()
+    local playerGui = Player:WaitForChild("PlayerGui", 10)
+    if not playerGui then return end
+
+    local function checkAndSuppress(gui)
+        if not gui or not gui.Parent then return end
+        task.wait(0.05)
+        if not gui.Parent then return end
+        for _, v in ipairs(gui:GetDescendants()) do
+            if v:IsA("TextLabel") or v:IsA("TextBox") or v:IsA("TextButton") then
+                local t = v.Text:lower()
+                if t:find("tycoon not complete") or t:find("not complete %(") then
+                    pcall(function() gui:Destroy() end)
+                    return
+                end
+            end
+        end
+    end
+
+    playerGui.ChildAdded:Connect(checkAndSuppress)
+    pcall(function()
+        game:GetService("CoreGui").ChildAdded:Connect(checkAndSuppress)
+    end)
+end)
+
+-- ================================================
+-- RESPAWN HANDLER
+-- ================================================
+Player.CharacterAdded:Connect(function(char)
+    Character = char
+    Humanoid  = char:WaitForChild("Humanoid")
+    HRP       = char:WaitForChild("HumanoidRootPart")
+    State.Flying = false
+    State.Noclip = false
+
+    if State.GodMode and lastDeathPos then
+        task.spawn(function()
+            for _ = 1, 8 do
+                task.wait(0.1)
+                local HRP = GetHRP()
+                if HRP then pcall(function() HRP.CFrame = lastDeathPos end) end
+            end
+        end)
+    elseif State.AutoFarm and State.LastBossPos then
+        task.spawn(function()
+            for _ = 1, 5 do
+                task.wait(0.2)
+                local _, _, freshHRP = GetAnyBoss()
+                local HRP = GetHRP()
+                if HRP then
+                    HRP.CFrame = freshHRP
+                        and freshHRP.CFrame * CFrame.new(0, 0, 3)
+                        or  State.LastBossPos * CFrame.new(0, 0, 3)
+                end
+            end
+            if State.AutoFarm then StartFarm() end
+        end)
+    end
+
+    if State.SpeedHack then
+        task.wait(1.5)
+        Humanoid.WalkSpeed = State.WalkSpeed
+        if SpeedRemote then pcall(function() SpeedRemote:FireServer(State.WalkSpeed) end) end
+    end
+    if State.DashNoCD then task.wait(1); StartDashNoCD() end
+    if State.AutoFarm  then task.wait(1); StartFarm()    end
+    if State.GodMode then
+        for _, c in ipairs(godModeConns) do pcall(function() c:Disconnect() end) end
+        godModeConns = {}
+        task.wait(0.5)
+        ApplyGodModeToChar(char)
+    end
+end)
+
+-- ================================================
 -- ANIM BYPASS
 -- ================================================
 local function FireSkillWithAnimBypass(skillRemote, ...)
@@ -1196,9 +1398,7 @@ end
 -- ================================================
 -- ZENON RAID SYSTEM
 -- ================================================
-
 local RaidHPParagraph = nil
-
 local RAID_PORTAL_BASE = Vector3.new(-481.420, 52.603, -59.995)
 
 local RAID_DIFFICULTIES = {
@@ -1224,11 +1424,6 @@ local function GetRaidPortalPos(difficultyIndex)
     return RAID_PORTAL_BASE + RAID_DIFFICULTIES[difficultyIndex].offset + Vector3.new(0, 5, 0)
 end
 
--- ================================================
--- Spawner do Boss da Raid: -102.169, -11.037, -86.828
--- Player fica fixo 40 studs ACIMA do spawner para farmar sem se mover
--- Boss é teleportado para o spawner (nível do chão)
--- ================================================
 local RAID_SPAWNER_POS = Vector3.new(-102.16886901855469, -11.037002563476562, -86.8280029296875)
 local RAID_FARM_POS    = Vector3.new(-102.16886901855469, -11.037002563476562 + 40, -86.8280029296875)
 
@@ -1243,10 +1438,10 @@ local RaidDropFilter = {
 }
 
 local DROP_FOLDER_PATTERNS = {
-    Yen              = {"Yen", "yen"},
-    CursedEnergy     = {"CursedEnergy", "Cursed Energy", "cursed_energy"},
-    CursedFinger     = {"CursedFingers", "CursedFinger", "cursed_finger"},
-    CharacterRemains = {"CharacterRemains", "Character Remains"},
+    Yen              = {"Yen"},
+    CursedEnergy     = {"CursedEnergy", "Cursed Energy", "cursed_energy", "CursedEnergie"},
+    CursedFinger     = {"CursedFingers", "CursedFinger", "Cursed Fingers", "Cursed Finger"},
+    CharacterRemains = {"CharacterRemains", "Character Remains", "CharacterRemain"},
 }
 
 local function ItemMatchesFilter(itemName)
@@ -1262,154 +1457,63 @@ local function ItemMatchesFilter(itemName)
     return false
 end
 
--- ================================================
--- FIX: CollectRaidDrops reescrito
--- Problemas anteriores:
---   1. Só buscava Prompt como filho direto do item, perdia prompts aninhados
---   2. Não tentava firetouchinterest em todos os BaseParts do item
---   3. Não buscava em subfolders dentro de Drops
--- Correções:
---   1. Busca Prompt em todos os descendentes (FindFirstChild recursivo via GetDescendants)
---   2. Tenta firetouchinterest em todos os BaseParts encontrados no item
---   3. Percorre subfolders dentro de Drops antes de tentar coletar
--- ================================================
 local function CollectRaidDrops()
     local dropsFolder = workspace:FindFirstChild("Map")
     dropsFolder = dropsFolder and dropsFolder:FindFirstChild("Boss")
     dropsFolder = dropsFolder and dropsFolder:FindFirstChild("Main")
     dropsFolder = dropsFolder and dropsFolder:FindFirstChild("Drops")
-    if not dropsFolder then return end
+    if not dropsFolder or #dropsFolder:GetChildren() == 0 then return end
 
     local hrp = Player.Character and Player.Character:FindFirstChild("HumanoidRootPart")
     if not hrp then return end
 
     local savedPos = hrp.CFrame
 
-    -- Coleta todos os itens dentro de Drops (incluindo subfolders)
-    local itemsToCollect = {}
-    for _, child in ipairs(dropsFolder:GetChildren()) do
-        if child:IsA("Folder") or child:IsA("Model") then
-            -- Pode ser uma subfolder de categoria (ex: "Yen", "CursedFingers")
-            -- ou diretamente um item com BasePart
-            local hasPart = child:FindFirstChildOfClass("BasePart") ~= nil
-            if hasPart then
-                -- É um item direto
-                if ItemMatchesFilter(child.Name) then
-                    table.insert(itemsToCollect, child)
-                end
-            else
-                -- É uma subfolder de categoria, itera os filhos
-                if ItemMatchesFilter(child.Name) then
-                    for _, item in ipairs(child:GetChildren()) do
-                        table.insert(itemsToCollect, item)
-                    end
-                end
-            end
-        elseif child:IsA("BasePart") then
-            -- Item solto como BasePart direta
-            if ItemMatchesFilter(child.Name) then
-                table.insert(itemsToCollect, child)
-            end
-        end
-    end
-
-    for _, item in ipairs(itemsToCollect) do
+    for _, item in ipairs(dropsFolder:GetChildren()) do
         if not item or not item.Parent then continue end
+        if not ItemMatchesFilter(item.Name) then continue end
 
         hrp = Player.Character and Player.Character:FindFirstChild("HumanoidRootPart")
         if not hrp then break end
 
-        -- Pega o primeiro BasePart do item para teleportar
-        local part = item:IsA("BasePart") and item
-                  or item:FindFirstChildOfClass("BasePart")
+        local part = item:IsA("BasePart") and item or item:FindFirstChildOfClass("BasePart")
         if not part or not part.Parent then continue end
 
-        -- Teleporta player até o item
+        local prompt = item:FindFirstChild("Prompt")
+        if not prompt then continue end
+
+        pcall(function()
+            prompt.MaxActivationDistance = math.huge
+            prompt.HoldDuration = 0
+        end)
         pcall(function()
             hrp.CFrame = CFrame.new(part.Position + Vector3.new(0, 3, 0))
         end)
-        task.wait(0.08)
+        task.wait(0.1)
 
         if not item.Parent then continue end
 
-        -- Busca ProximityPrompt em qualquer descendente do item
-        local prompt = nil
-        for _, desc in ipairs(item:GetDescendants()) do
-            if desc:IsA("ProximityPrompt") then
-                prompt = desc
-                break
-            end
-        end
-        -- Também tenta no próprio item se for BasePart
-        if not prompt and item:IsA("BasePart") then
-            prompt = item:FindFirstChildOfClass("ProximityPrompt")
-        end
-
-        if prompt then
-            pcall(function() prompt.MaxActivationDistance = math.huge end)
-            pcall(function() prompt.HoldDuration = 0 end)
-            pcall(function() fireproximityprompt(prompt) end)
-            task.wait(0.05)
-        end
-
-        -- Tenta firetouchinterest em todos os BaseParts do item
-        local parts = {}
-        if item:IsA("BasePart") then
-            table.insert(parts, item)
-        end
-        for _, desc in ipairs(item:GetDescendants()) do
-            if desc:IsA("BasePart") then
-                table.insert(parts, desc)
-            end
-        end
-        for _, bp in ipairs(parts) do
-            if bp and bp.Parent then
-                pcall(function()
-                    firetouchinterest(hrp, bp, 0)
-                    task.wait(0.03)
-                    firetouchinterest(hrp, bp, 1)
-                end)
-            end
-        end
-
+        pcall(function() fireproximityprompt(prompt) end)
         task.wait(0.05)
+        pcall(function()
+            firetouchinterest(hrp, part, 0)
+            task.wait(0.03)
+            firetouchinterest(hrp, part, 1)
+        end)
+
+        local t = 0
+        while item.Parent and t < 0.3 do
+            task.wait(0.05)
+            t += 0.05
+        end
     end
 
-    -- Retorna para a posição de farm
     hrp = Player.Character and Player.Character:FindFirstChild("HumanoidRootPart")
     if hrp then
         pcall(function() hrp.CFrame = savedPos end)
     end
 end
 
-local function TeleportBossesToSpawner()
-    local spawnerPart = workspace:FindFirstChild("Map")
-    spawnerPart = spawnerPart and spawnerPart:FindFirstChild("Boss")
-    spawnerPart = spawnerPart and spawnerPart:FindFirstChild("Main")
-    spawnerPart = spawnerPart and spawnerPart:FindFirstChild("Spawner")
-    spawnerPart = spawnerPart and spawnerPart:FindFirstChild("Spawner")
-    local targetPos = spawnerPart and spawnerPart.Position or RAID_SPAWNER_POS
-
-    local bossMap = workspace:FindFirstChild("Map")
-    bossMap = bossMap and bossMap:FindFirstChild("Boss")
-    bossMap = bossMap and bossMap:FindFirstChild("Main")
-    local bosses = bossMap and bossMap:FindFirstChild("Bosses")
-    if bosses then
-        for _, boss in ipairs(bosses:GetChildren()) do
-            local bHRP = boss:FindFirstChild("HumanoidRootPart")
-            local bHum = boss:FindFirstChildOfClass("Humanoid")
-            if bHRP and bHum and bHum.Health > 0 then
-                pcall(function()
-                    bHRP.CFrame = CFrame.new(targetPos + Vector3.new(0, 3, 0))
-                end)
-            end
-        end
-    end
-end
-
--- ================================================
--- FIX: Função auxiliar para verificar se há boss vivo na Raid
--- ================================================
 local function GetRaidBossAlive()
     local bossMap = workspace:FindFirstChild("Map")
     bossMap = bossMap and bossMap:FindFirstChild("Boss")
@@ -1425,22 +1529,10 @@ local function GetRaidBossAlive()
     return false
 end
 
--- ================================================
--- StartRaidAutoFarm
--- Comportamento:
---   1. Teleporta player para 40 studs acima do spawner (RAID_FARM_POS)
---   2. Mantém player FIXO nessa posição via BodyPosition — não anda
---   3. Boss é teleportado para o spawner (nível do chão) a cada tick
---   4. DumpBoss e ExtendHitbox (50000) ativados automaticamente
---   5. Spama skills enquanto boss estiver vivo
---   6. Ao boss morrer: pausa skills, coleta todos os drops, volta para RAID_FARM_POS
---   7. Aguarda próximo respawn e repete
--- ================================================
 local function StartRaidAutoFarm()
     if raidFarmThread then return end
     State_RaidFarm = true
 
-    -- Ativa DumpBoss e ExtendHitbox com range máximo
     State.DumpBoss = true
     State.ExtendHitbox = true
     State.HitboxSize = 50000
@@ -1449,7 +1541,6 @@ local function StartRaidAutoFarm()
     raidFarmThread = task.spawn(function()
         local hrp = Player.Character and Player.Character:FindFirstChild("HumanoidRootPart")
 
-        -- BodyPosition para manter player fixo no ar acima do spawner
         local bodyPos = nil
         local function AttachBodyPos()
             if bodyPos then pcall(function() bodyPos:Destroy() end) end
@@ -1461,7 +1552,6 @@ local function StartRaidAutoFarm()
             bodyPos.P          = 10000
             bodyPos.Position   = RAID_FARM_POS
             bodyPos.Parent     = currentHRP
-            -- Desativa colisão para não ser empurrado
             local hum = Player.Character and Player.Character:FindFirstChildOfClass("Humanoid")
             if hum then hum.PlatformStand = false end
         end
@@ -1473,7 +1563,6 @@ local function StartRaidAutoFarm()
             end
         end
 
-        -- Teleporta para farm pos inicial
         hrp = Player.Character and Player.Character:FindFirstChild("HumanoidRootPart")
         if hrp then
             pcall(function() hrp.CFrame = CFrame.new(RAID_FARM_POS) end)
@@ -1481,38 +1570,12 @@ local function StartRaidAutoFarm()
         task.wait(0.2)
         AttachBodyPos()
 
-        -- Watcher de awakening
-        local awakeningCooldown = false
-        local hpWatcher = task.spawn(function()
-            while State_RaidFarm do
-                pcall(function()
-                    local char = Player.Character
-                    if not char then return end
-                    local hum = char:FindFirstChildOfClass("Humanoid")
-                    if not hum then return end
-                    local pct = math.floor((hum.Health / hum.MaxHealth) * 100)
-                    if pct <= 20 and not awakeningCooldown and AwakeningRemote then
-                        awakeningCooldown = true
-                        _G._RaidSkillPause = true
-                        task.wait(0.3)
-                        pcall(function() AwakeningRemote:FireServer() end)
-                        task.wait(1)
-                        _G._RaidSkillPause = false
-                        task.delay(10, function() awakeningCooldown = false end)
-                    end
-                end)
-                task.wait(0.5)
-            end
-        end)
-
         local wasAlive = false
 
-        -- Loop principal de farm
         while State_RaidFarm do
             pcall(function()
                 local bossAlive = GetRaidBossAlive()
 
-                -- Reconecta BodyPosition se perdido (respawn do player)
                 local currentHRP = Player.Character and Player.Character:FindFirstChild("HumanoidRootPart")
                 if currentHRP and (not bodyPos or not bodyPos.Parent) then
                     pcall(function() currentHRP.CFrame = CFrame.new(RAID_FARM_POS) end)
@@ -1523,7 +1586,26 @@ local function StartRaidAutoFarm()
                 if bossAlive then
                     wasAlive = true
 
-                    -- DumpBoss: ancora boss no spawner
+                    local isMakiBoss = false
+                    pcall(function()
+                        local bossMain = workspace:FindFirstChild("Map")
+                        bossMain = bossMain and bossMain:FindFirstChild("Boss")
+                        bossMain = bossMain and bossMain:FindFirstChild("Main")
+                        local bosses = bossMain and bossMain:FindFirstChild("Bosses")
+                        if bosses then
+                            for _, boss in ipairs(bosses:GetChildren()) do
+                                local bHum = boss:FindFirstChildOfClass("Humanoid")
+                                if bHum and bHum.Health > 0 then
+                                    local name = CleanBossName(boss.Name)
+                                    if name:lower():find("maki") then
+                                        isMakiBoss = true
+                                        _G._LastRaidBossWasMaki = true
+                                    end
+                                end
+                            end
+                        end
+                    end)
+
                     pcall(function()
                         local bossMain = workspace:FindFirstChild("Map")
                         bossMain = bossMain and bossMain:FindFirstChild("Boss")
@@ -1534,9 +1616,7 @@ local function StartRaidAutoFarm()
                                 local bHRP = boss:FindFirstChild("HumanoidRootPart")
                                 local bHum = boss:FindFirstChildOfClass("Humanoid")
                                 if bHRP and bHum and bHum.Health > 0 then
-                                    -- Ancora boss no spawner (nível do chão, 40 studs abaixo do player)
                                     bHRP.CFrame = CFrame.new(RAID_SPAWNER_POS)
-                                    -- Ancora as partes para não se mover
                                     for _, p in ipairs(boss:GetDescendants()) do
                                         if p:IsA("BasePart") then p.Anchored = true end
                                         if p:IsA("Script") then p.Disabled = true end
@@ -1548,7 +1628,6 @@ local function StartRaidAutoFarm()
                         end
                     end)
 
-                    -- Spama skills (player fica parado, skills atingem boss via ExtendHitbox)
                     local char = Player.Character
                     if char and not _G._RaidSkillPause then
                         local attacking = char:GetAttribute("Attacking")
@@ -1578,35 +1657,50 @@ local function StartRaidAutoFarm()
                                     SkillRemote:FireServer(activeChar, "M1_" .. killAuraCombo)
                                     killAuraCombo = (killAuraCombo % killAuraMaxCombo) + 1
                                 end
+                                pcall(function() SkillRemote:FireServer("Gojo", "Red") end)
+                                pcall(function() SkillRemote:FireServer("Gojo", "Lapse Blue") end)
                             end
                         end
                     end
 
                 elseif wasAlive then
-                    -- Boss acabou de morrer: coleta drops e volta
                     wasAlive = false
                     _G._RaidSkillPause = true
 
-                    -- Desanexa BodyPosition temporariamente para poder se mover
+                    local makiWasLastBoss = false
+                    pcall(function()
+                        if _G._LastRaidBossWasMaki then
+                            makiWasLastBoss = true
+                            _G._LastRaidBossWasMaki = false
+                        end
+                    end)
+
                     DetachBodyPos()
                     task.wait(0.1)
 
-                    -- Aguarda até 3s para drops aparecerem
-                    local dropsFolder = workspace:FindFirstChild("Map")
-                    dropsFolder = dropsFolder and dropsFolder:FindFirstChild("Boss")
-                    dropsFolder = dropsFolder and dropsFolder:FindFirstChild("Main")
-                    dropsFolder = dropsFolder and dropsFolder:FindFirstChild("Drops")
-                    if dropsFolder then
+                    local dropsFolder2 = workspace:FindFirstChild("Map")
+                    dropsFolder2 = dropsFolder2 and dropsFolder2:FindFirstChild("Boss")
+                    dropsFolder2 = dropsFolder2 and dropsFolder2:FindFirstChild("Main")
+                    dropsFolder2 = dropsFolder2 and dropsFolder2:FindFirstChild("Drops")
+                    if dropsFolder2 then
                         local waited = 0
-                        while #dropsFolder:GetChildren() == 0 and waited < 3 do
+                        while #dropsFolder2:GetChildren() == 0 and waited < 3 do
                             task.wait(0.2); waited += 0.2
                         end
                     end
 
-                    -- Coleta todos os drops
                     CollectRaidDrops()
 
-                    -- Volta para farm pos e reanexa BodyPosition
+                    if makiWasLastBoss then
+                        Rayfield:Notify({
+                            Title   = "✅ Raid Complete!",
+                            Content = "Maki defeated. Raid Auto Farm disabled.",
+                            Duration = 5,
+                        })
+                        State_RaidFarm = false
+                        return
+                    end
+
                     local freshHRP = Player.Character and Player.Character:FindFirstChild("HumanoidRootPart")
                     if freshHRP then
                         pcall(function() freshHRP.CFrame = CFrame.new(RAID_FARM_POS) end)
@@ -1616,7 +1710,6 @@ local function StartRaidAutoFarm()
                     _G._RaidSkillPause = false
 
                 else
-                    -- Sem boss e nunca houve: aguarda respawn parado no farm pos
                     local freshHRP = Player.Character and Player.Character:FindFirstChild("HumanoidRootPart")
                     if freshHRP and (not bodyPos or not bodyPos.Parent) then
                         pcall(function() freshHRP.CFrame = CFrame.new(RAID_FARM_POS) end)
@@ -1628,9 +1721,7 @@ local function StartRaidAutoFarm()
             task.wait(0.1)
         end
 
-        -- Cleanup ao parar
         DetachBodyPos()
-        task.cancel(hpWatcher)
         raidFarmThread = nil
     end)
 end
@@ -1647,7 +1738,7 @@ end
 -- RAYFIELD UI
 -- ================================================
 local Rayfield = loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
-print("[SorcererScript] Rayfield carregado")
+print("[SorcererScript] Rayfield loaded")
 
 local Window = Rayfield:CreateWindow({
     Name            = "Sorcerer Tycoon Script",
@@ -1692,75 +1783,78 @@ Instance.new("UICorner", logo).CornerRadius = UDim.new(1, 0)
 -- ================================================
 local FarmTab = Window:CreateTab("⚔ Main", 4483362458)
 
-local BossDropdown = FarmTab:CreateDropdown({
-    Name          = "Select Boss",
-    Options       = {"Any"},
-    CurrentOption = {"Any"},
-    Flag          = "BossSelect",
-    Callback = function(v)
-        selectedBossName = v[1] or "Any"
-    end,
+-- ================================================
+-- MAIN TAB: Player Status (HP + Character combined)
+-- ================================================
+local MainStatusParagraph = FarmTab:CreateParagraph({
+    Title   = "🥷 Player Status",
+    Content = "Loading...",
 })
 
 task.spawn(function()
-    task.wait(3)
-    local names = GetAllBossNames()
-    BossDropdown:Refresh(names, false)
-end)
+    while true do
+        task.wait(0.5)
+        pcall(function()
+            local char = Player.Character
+            local hum = char and char:FindFirstChildOfClass("Humanoid")
 
-local StatusParagraph = FarmTab:CreateParagraph({
-    Title = "Boss Status", Content = "Checking...",
-})
+            -- HP bar
+            local barStr = "N/A"
+            if hum then
+                local pct = math.floor((hum.Health / hum.MaxHealth) * 100)
+                local filled = math.floor(pct / 5)
+                barStr = string.format("[%s] %d%%  (%d/%d)",
+                    string.rep("█", filled) .. string.rep("░", 20 - filled),
+                    pct, math.floor(hum.Health), math.floor(hum.MaxHealth))
+            end
 
-task.spawn(function()
-    while task.wait(0.5) do
-        local boss, bossHum = GetSelectedBoss()
-        if boss and bossHum then
-            local hp = math.floor(bossHum.Health)
-            local mx = math.floor(bossHum.MaxHealth)
-            local bossName = CleanBossName(boss.Name)
-            StatusParagraph:Set({
-                Title   = "● " .. bossName .. " — ALIVE",
-                Content = string.format("HP: %d / %d  (%.1f%%)", hp, mx, (hp/mx)*100),
+            -- Active character
+            local activeChar = Player:GetAttribute("ActiveCharacter")
+            if not activeChar or activeChar == "" then
+                activeChar = GetEquippedCharName() or "None"
+            end
+
+            MainStatusParagraph:Set({
+                Title   = "🥷 " .. activeChar,
+                Content = "❤️ " .. barStr,
             })
-        else
-            StatusParagraph:Set({
-                Title   = "No boss active",
-                Content = selectedBossName == "Any" and "Lac / Shibuya / Metro / WorldBoss" or selectedBossName,
-            })
-        end
+        end)
     end
 end)
 
-FarmTab:CreateButton({
-    Name = "🔄 Refresh Boss List",
-    Callback = function()
-        local names = GetAllBossNames()
-        BossDropdown:Refresh(names, false)
-        BossDropdown:Set("Any")
-        selectedBossName = "Any"
-        Rayfield:Notify({ Title = "✅ Updated", Content = (#names - 1) .. " bosses found.", Duration = 2 })
-    end,
+-- ================================================
+-- MAIN TAB: Farm Status paragraph (real-time, above toggle)
+-- ================================================
+local FarmStatusParagraph = FarmTab:CreateParagraph({
+    Title   = "⚔️ Farm Status",
+    Content = "Idle",
 })
 
-FarmTab:CreateButton({
-    Name = "Teleport to Boss",
-    Callback = function()
-        local _, _, bossHRP = GetSelectedBoss()
-        if bossHRP then
-            TeleportToBossPos(bossHRP)
-            Rayfield:Notify({ Title = "✅ Teleported", Content = "You are at the Boss.", Duration = 2 })
-        else
-            Rayfield:Notify({ Title = "❌ Boss not found", Content = "Wait for boss to spawn.", Duration = 3 })
-        end
-    end,
-})
+task.spawn(function()
+    while true do
+        task.wait(0.5)
+        pcall(function()
+            FarmStatusParagraph:Set({
+                Title   = "⚔️ Farm Status",
+                Content = CurrentFarmStatus,
+            })
+        end)
+    end
+end)
 
 FarmTab:CreateToggle({
     Name = "Auto Farm Boss", CurrentValue = false, Flag = "AutoFarm",
     Callback = function(v)
-        State.AutoFarm = v
-        if v then StartFarm() else StopFarm() end
+        if v then
+            if farmThread then
+                State.AutoFarm = false
+                task.wait(0.2)
+                farmThread = nil
+            end
+            StartFarm()
+        else
+            StopFarm()
+        end
     end,
 })
 
@@ -1791,6 +1885,27 @@ FarmTab:CreateToggle({
     Callback = function(v)
         State.AutoCollectDrops = v
         if v then StartAutoCollectDrops() end
+    end,
+})
+
+-- Drop filter multi-select dropdown
+FarmTab:CreateDropdown({
+    Name            = "Drop Filter",
+    Options         = {"Yen", "Cursed Energy", "Cursed Fingers", "Boss Remain"},
+    CurrentOption   = {"Yen", "Cursed Energy", "Cursed Fingers", "Boss Remain"},
+    MultipleOptions = true,
+    Flag            = "BossDropFilterDropdown",
+    Callback = function(selected)
+        BossDropFilter.Yen     = false
+        BossDropFilter.Energy  = false
+        BossDropFilter.Fingers = false
+        BossDropFilter.Remains = false
+        for _, v in ipairs(selected) do
+            if v == "Yen"            then BossDropFilter.Yen     = true end
+            if v == "Cursed Energy"  then BossDropFilter.Energy  = true end
+            if v == "Cursed Fingers" then BossDropFilter.Fingers = true end
+            if v == "Boss Remain"    then BossDropFilter.Remains = true end
+        end
     end,
 })
 
@@ -1850,7 +1965,7 @@ local SkillTab = Window:CreateTab("⚡ Skills", 4483362458)
 
 SkillTab:CreateParagraph({
     Title   = "Domain Expansion",
-    Content = "Character Domain Expansion and Skill. You need unlock all First",
+    Content = "Character Domain Expansion and Skill. You need to unlock all first.",
 })
 
 SkillTab:CreateButton({
@@ -1882,6 +1997,13 @@ SkillTab:CreateButton({
     end,
 })
 SkillTab:CreateButton({
+    Name = "Maki Domain Expansion",
+    Callback = function()
+        if SkillRemote then pcall(function() SkillRemote:FireServer("Maki", "Heavenly Restriction: Awakened") end) end
+        Rayfield:Notify({ Title = "Maki", Content = "Heavenly Restriction: Awakened", Duration = 2 })
+    end,
+})
+SkillTab:CreateButton({
     Name = "Megumi Domain Expansion",
     Callback = function()
         if SkillRemote then pcall(function() SkillRemote:FireServer("Megumi", "Chimera Shadow Garden") end) end
@@ -1909,9 +2031,30 @@ SkillTab:CreateButton({
         Rayfield:Notify({ Title = "Choso", Content = "Flowing Red Scale: Crimson Binding", Duration = 2 })
     end,
 })
+SkillTab:CreateButton({
+    Name = "Nobara Domain Expansion",
+    Callback = function()
+        if SkillRemote then pcall(function() SkillRemote:FireServer("Nobara", "Resonance: Total Collapse") end) end
+        Rayfield:Notify({ Title = "Nobara", Content = "Resonance: Total Collapse", Duration = 2 })
+    end,
+})
+SkillTab:CreateButton({
+    Name = "Toge Domain Expansion",
+    Callback = function()
+        if SkillRemote then pcall(function() SkillRemote:FireServer("Toge", "Cursed Speech: Obliterate") end) end
+        Rayfield:Notify({ Title = "Toge", Content = "Cursed Speech: Obliterate", Duration = 2 })
+    end,
+})
+SkillTab:CreateButton({
+    Name = "Todo Domain Expansion",
+    Callback = function()
+        if SkillRemote then pcall(function() SkillRemote:FireServer("Todo", "Boogie Woogie: Phantom Assault") end) end
+        Rayfield:Notify({ Title = "Todo", Content = "Boogie Woogie: Phantom Assault", Duration = 2 })
+    end,
+})
 SkillTab:CreateParagraph({
     Title   = "Innate Techniques",
-    Content = "Character Innate Techniques. You need unlock all First",
+    Content = "Character Innate Techniques. You need to unlock all first.",
 })
 
 SkillTab:CreateButton({
@@ -2018,6 +2161,7 @@ SkillTab:CreateButton({
         Rayfield:Notify({ Title = "Jogo", Content = "Volcanic Armageddon", Duration = 2 })
     end,
 })
+
 -- ================================================
 -- TAB: MOVEMENT
 -- ================================================
@@ -2155,7 +2299,7 @@ end)
 TpTab:CreateSection("🏯 My Tycoon")
 
 TpTab:CreateButton({
-    Name = "→ Teleport to Your Tycoon",
+    Name = "Teleport to Your Tycoon",
     Callback = function()
         local HRP = GetHRP()
         if not HRP then
@@ -2163,9 +2307,7 @@ TpTab:CreateButton({
             return
         end
 
-        if not CurrentTycoon then
-            DetectMyTycoon()
-        end
+        if not CurrentTycoon then DetectMyTycoon() end
 
         if not CurrentTycoon then
             Rayfield:Notify({
@@ -2209,7 +2351,7 @@ TpTab:CreateButton({
             local charName = CurrentTycoon:gsub("^Tycoon", "")
             Rayfield:Notify({
                 Title   = "✅ Teleported",
-                Content = "→ Tycoon " .. charName,
+                Content = "Tycoon " .. charName,
                 Duration = 2,
             })
         else
@@ -2233,29 +2375,20 @@ local ShopTeleports = {
     { name = "Merchant",          pos = Vector3.new(-396.008, 9.684,  140.902) },
 }
 
-local function GetShopPos(shop)
-    return shop.pos
-end
-
 for _, shop in ipairs(ShopTeleports) do
     local shopRef = shop
     TpTab:CreateButton({
-        Name = "→ " .. shopRef.name,
+        Name = "" .. shopRef.name,
         Callback = function()
             local HRP = GetHRP()
             if not HRP then return end
-            local pos = GetShopPos(shopRef)
-            if pos then
-                HRP.CFrame = CFrame.new(pos + Vector3.new(0, 5, 0))
-                Rayfield:Notify({ Title = "✅ " .. shopRef.name, Content = "Teleported.", Duration = 2 })
-            else
-                Rayfield:Notify({ Title = "❌ " .. shopRef.name, Content = "Shop not found.", Duration = 2 })
-            end
+            HRP.CFrame = CFrame.new(shopRef.pos + Vector3.new(0, 5, 0))
+            Rayfield:Notify({ Title = "✅ " .. shopRef.name, Content = "Teleported.", Duration = 2 })
         end,
     })
 end
 
-TpTab:CreateSection("👾 Boss Spawns NPC")
+TpTab:CreateSection("👾 Boss Spawn NPC")
 
 local BossSpawnTeleports = {
     { name = "Lake",    pos = Vector3.new(426.629,   19.016, -435.469) },
@@ -2279,7 +2412,7 @@ end
 for _, spawn in ipairs(BossSpawnTeleports) do
     local spawnRef = spawn
     TpTab:CreateButton({
-        Name = "→ " .. spawnRef.name .. " Boss Spawn",
+        Name = "" .. spawnRef.name .. " Boss Spawn",
         Callback = function()
             local HRP = GetHRP()
             if not HRP then return end
@@ -2309,6 +2442,124 @@ TpTab:CreateButton({
         Rayfield:Notify({ Title = "✅ Shibuya", Content = "Teleported outside Shibuya.", Duration = 2 })
     end,
 })
+
+-- ================================================
+-- BOSS STATUS PER ZONE + TELEPORT TO BOSS
+-- ================================================
+TpTab:CreateSection("👹 Boss Status & Teleport")
+
+local ZoneStatusNames = {
+    { key = "Lac",       label = "🌊 Lac" },
+    { key = "Metro",     label = "🚇 Metro" },
+    { key = "Shibuya",   label = "🏙️ Shibuya" },
+    { key = "WorldBoss", label = "🌍 World Boss" },
+    { key = "Main",      label = "⚔️ Raid (Main)" },
+}
+
+-- For each zone: paragraph showing status + button to teleport to alive boss
+local ZoneStatusParagraphs = {}
+
+for _, zone in ipairs(ZoneStatusNames) do
+    local zoneKey   = zone.key
+    local zoneLabel = zone.label
+
+    -- Status paragraph
+    ZoneStatusParagraphs[zoneKey] = TpTab:CreateParagraph({
+        Title   = zoneLabel,
+        Content = "Checking...",
+    })
+
+    -- Teleport to Boss button (per zone)
+    TpTab:CreateButton({
+        Name = "Teleport to " .. zoneLabel .. " Boss",
+        Callback = function()
+            local HRP = GetHRP()
+            if not HRP then
+                Rayfield:Notify({ Title = "❌ Error", Content = "Character not found.", Duration = 3 })
+                return
+            end
+            local bossMap = workspace:FindFirstChild("Map")
+            bossMap = bossMap and bossMap:FindFirstChild("Boss")
+            local zoneFolder = bossMap and bossMap:FindFirstChild(zoneKey)
+            local bosses = zoneFolder and zoneFolder:FindFirstChild("Bosses")
+            if bosses then
+                for _, boss in ipairs(bosses:GetChildren()) do
+                    local bHum = boss:FindFirstChildOfClass("Humanoid")
+                    local bHRP = boss:FindFirstChild("HumanoidRootPart")
+                    if bHum and bHum.Health > 0 and bHRP then
+                        -- Handle Shibuya portal
+                        if bHRP.Position.X < SHIBUYA_THRESHOLD_X and not IsInShibuya() then
+                            HRP.CFrame = CFrame.new(SHIBUYA_PORTAL_EXIT + Vector3.new(0, 5, 0))
+                            task.wait(0.3)
+                            local freshHRP = GetHRP()
+                            if freshHRP then freshHRP.CFrame = bHRP.CFrame * CFrame.new(0, 0, 3) end
+                        else
+                            HRP.CFrame = bHRP.CFrame * CFrame.new(0, 0, 3)
+                        end
+                        Rayfield:Notify({
+                            Title   = "✅ Teleported",
+                            Content = "→ " .. CleanBossName(boss.Name) .. " (" .. zoneLabel .. ")",
+                            Duration = 2,
+                        })
+                        return
+                    end
+                end
+            end
+            Rayfield:Notify({
+                Title   = "❌ No boss alive",
+                Content = "No alive boss found in " .. zoneLabel,
+                Duration = 3,
+            })
+        end,
+    })
+end
+
+-- Live update loop for zone status paragraphs
+task.spawn(function()
+    while task.wait(0.5) do
+        pcall(function()
+            local bossMap = workspace:FindFirstChild("Map")
+            bossMap = bossMap and bossMap:FindFirstChild("Boss")
+            if not bossMap then return end
+            for _, zone in ipairs(ZoneStatusNames) do
+                local para = ZoneStatusParagraphs[zone.key]
+                if not para then continue end
+                local zoneFolder = bossMap:FindFirstChild(zone.key)
+                if not zoneFolder then
+                    para:Set({ Title = zone.label, Content = "Zone not found" })
+                    continue
+                end
+                local bosses = zoneFolder:FindFirstChild("Bosses")
+                if not bosses then
+                    para:Set({ Title = zone.label, Content = "No bosses folder" })
+                    continue
+                end
+                local aliveBosses = {}
+                for _, boss in ipairs(bosses:GetChildren()) do
+                    local hum = boss:FindFirstChildOfClass("Humanoid")
+                    if hum and hum.Health > 0 then
+                        local name = CleanBossName(boss.Name)
+                        local hp = math.floor(hum.Health)
+                        local mx = math.floor(hum.MaxHealth)
+                        table.insert(aliveBosses, string.format("%s  HP: %d/%d (%.0f%%)", name, hp, mx, (hp/mx)*100))
+                    end
+                end
+                if #aliveBosses > 0 then
+                    para:Set({
+                        Title   = "● " .. zone.label .. " — " .. #aliveBosses .. " boss(es) alive",
+                        Content = table.concat(aliveBosses, "\n"),
+                    })
+                else
+                    para:Set({
+                        Title   = "○ " .. zone.label,
+                        Content = "No boss alive — Teleport button disabled",
+                    })
+                end
+            end
+        end)
+    end
+end)
+
 -- ================================================
 -- TAB: ZENON RAID
 -- ================================================
@@ -2330,7 +2581,7 @@ RaidTab:CreateSection("❤️ HP")
 
 RaidHPParagraph = RaidTab:CreateParagraph({
     Title   = "❤️ Health Bar",
-    Content = "loading...",
+    Content = "Loading...",
 })
 
 task.defer(function()
@@ -2370,28 +2621,6 @@ RaidTab:CreateToggle({
     end,
 })
 
-RaidTab:CreateSection("Auto Collect")
-
-RaidTab:CreateToggle({
-    Name = "Yen", CurrentValue = true, Flag = "RaidDropYen",
-    Callback = function(v) RaidDropFilter.Yen = v end,
-})
-
-RaidTab:CreateToggle({
-    Name = "Cursed Energy", CurrentValue = true, Flag = "RaidDropCE",
-    Callback = function(v) RaidDropFilter.CursedEnergy = v end,
-})
-
-RaidTab:CreateToggle({
-    Name = "Cursed Finger", CurrentValue = true, Flag = "RaidDropCF",
-    Callback = function(v) RaidDropFilter.CursedFinger = v end,
-})
-
-RaidTab:CreateToggle({
-    Name = "Character Remains", CurrentValue = true, Flag = "RaidDropCR",
-    Callback = function(v) RaidDropFilter.CharacterRemains = v end,
-})
-
 -- ================================================
 -- TAB: INFO
 -- ================================================
@@ -2399,13 +2628,13 @@ local InfoTab = Window:CreateTab("ℹ Info", 4483362458)
 
 TycoonParagraph = InfoTab:CreateParagraph({
     Title   = "🏯 My Tycoon",
-    Content = "Detectig...",
+    Content = "Detecting...",
 })
 
 task.spawn(function()
     task.wait(3)
     DetectMyTycoon()
-    local display = CurrentTycoon and CurrentTycoon:gsub("^Tycoon","") or "Nothing"
+    local display = CurrentTycoon and CurrentTycoon:gsub("^Tycoon","") or "Not found"
     TycoonParagraph:Set({ Title = "🏯 My Tycoon", Content = display })
     HookClaimRemote()
 end)
@@ -2415,14 +2644,14 @@ InfoTab:CreateButton({
     Callback = function()
         CurrentTycoon = nil
         DetectMyTycoon()
-        local display = CurrentTycoon and CurrentTycoon:gsub("^Tycoon","") or "Nothing"
+        local display = CurrentTycoon and CurrentTycoon:gsub("^Tycoon","") or "Not found"
         TycoonParagraph:Set({ Title = "🏯 My Tycoon", Content = display })
         Rayfield:Notify({ Title = "🏯 Tycoon", Content = display, Duration = 3 })
     end,
 })
 
 InfoTab:CreateButton({
-    Name = "🏠 Claim detected tycoon",
+    Name = "🏠 Claim Detected Tycoon",
     Callback = function()
         if not CurrentTycoon then DetectMyTycoonIfNeeded() end
         if not CurrentTycoon then
@@ -2438,7 +2667,7 @@ InfoTab:CreateButton({
                 Rayfield:Notify({ Title = "❌ Error", Content = tostring(err), Duration = 4 })
             end
         else
-            Rayfield:Notify({ Title = "❌ No found", Content = "Tycoon.Claim", Duration = 3 })
+            Rayfield:Notify({ Title = "❌ Not found", Content = "Tycoon.Claim", Duration = 3 })
         end
     end,
 })
@@ -2542,4 +2771,4 @@ InfoTab:CreateToggle({
 
 -- ================================================
 Rayfield:LoadConfiguration()
-print("[Sorcerer Scripts v14] Loaded!")
+print("[Sorcerer Scripts v21] Loaded!")
