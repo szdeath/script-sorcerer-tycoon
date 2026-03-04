@@ -268,7 +268,7 @@ local function ShowKeyUI(keysData, onSuccess)
     BtnConfirm.Position         = UDim2.new(0,20,0,128)
     BtnConfirm.BackgroundColor3 = Color3.fromRGB(60,100,230)
     BtnConfirm.BorderSizePixel  = 0
-    BtnConfirm.Text             = "✅  Confirm Key"
+    BtnConfirm.Text             = "✅  Check Key"
     BtnConfirm.TextColor3       = Color3.fromRGB(255,255,255)
     BtnConfirm.TextSize         = 14
     BtnConfirm.Font             = Enum.Font.GothamBold
@@ -2080,3 +2080,4 @@ Rayfield:LoadConfiguration()
 print("[Sorcerer Scripts v22] Loaded!")
 
 end) -- end InitKeySystem
+
